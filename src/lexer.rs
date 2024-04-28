@@ -36,7 +36,7 @@ pub enum Token<'a> {
     #[token("]", |_|End)]
     Vector(StartOrEnd),
 
-    #[regex(";[^\n]", strip_first, priority=10)]
+    #[regex(";[^\n]*", strip_first, priority=10)]
     Comment(&'a str),
 
     EOF,
