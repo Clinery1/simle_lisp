@@ -1,0 +1,12 @@
+[package]
+name = "simple_lisp"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.82"
+logos = "0.14.0"
+misc_utils = { git = "https://github.com/Clinery1/misc_utils.git", version = "0.3.0" }
+parser_helper = { git = "https://github.com/Clinery1/parser_helper.git", version = "0.4.0", features = ["logos"] }
