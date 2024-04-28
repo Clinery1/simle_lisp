@@ -1,10 +1,15 @@
+//! TODO: add an early return expression e.g., `(return EXPR)`
+
+
 use parser_helper::SimpleError;
 use std::fs::read_to_string;
+use interpreter::*;
 
 
 mod lexer;
 mod parser;
 mod ast;
+mod interpreter;
 
 
 fn main() {
@@ -14,9 +19,13 @@ fn main() {
 
     match parser.parse_all() {
         Ok(exprs)=>{
-            for expr in exprs {
+            for expr in exprs.iter() {
                 println!("{expr:#?}");
             }
+
+            let (mut interpreter, _interner, ast) = Interpreter::new(exprs);
+
+            dbg!(interpreter.run(&ast).unwrap());
         },
         Err(e)=>error_trace(e, &source, "example"),
     }
