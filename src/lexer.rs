@@ -9,7 +9,8 @@ pub use StartOrEnd::*;
 #[derive(Debug, Logos, PartialEq)]
 #[logos(skip "[ \t\r\n]")]
 pub enum Token<'a> {
-    #[regex("[^ \t\r\n()\"'#0-9][^ \t\r\n()\"]*")]
+    /// all but whitespace, (), [], `#`, `'`, and `"`
+    #[regex("[^ \t\r\n()\\[\\]\"'#0-9][^ \t\r\n()\\[\\]\"]*")]
     Ident(&'a str),
 
     #[regex("[0-9][0-9_]*", number)]
@@ -29,7 +30,11 @@ pub enum Token<'a> {
 
     #[token("(", |_|Start)]
     #[token(")", |_|End)]
-    Paren(StartOrEnd),
+    List(StartOrEnd),
+
+    #[token("[", |_|Start)]
+    #[token("]", |_|End)]
+    Vector(StartOrEnd),
 
     #[regex(";[^\n]", strip_first, priority=10)]
     Comment(&'a str),

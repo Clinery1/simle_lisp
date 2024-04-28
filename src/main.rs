@@ -1,9 +1,4 @@
-//! # About this language
-//! This little language is dynamically typed, fully mutable, and designed for scripting instead of
-//! full programs. I might fork this language to make a more complete language, but this is simply
-//! "how fast can I go from zero to FizzBuzz"
-
-
+use parser_helper::SimpleError;
 use std::fs::read_to_string;
 
 
@@ -20,22 +15,36 @@ fn main() {
     match parser.parse_all() {
         Ok(exprs)=>{
             for expr in exprs {
-                println!("{expr:?}");
+                println!("{expr:#?}");
             }
         },
-        Err(e)=>error_trace(e),
+        Err(e)=>error_trace(e, &source, "example"),
     }
 }
 
-fn error_trace(err: anyhow::Error) {
+fn error_trace(err: anyhow::Error, source: &str, filename: &str) {
     let mut chain = err.chain().rev().peekable();
     let Some(root_cause) = chain.next() else {unreachable!("Error has no root cause!")};
 
-    println!("Error: {root_cause}");
+    if let Some(serr) = root_cause.downcast_ref::<SimpleError<String>>() {
+        serr.eprint_with_source(source, filename);
+        println!();
+    } else {
+        println!("Error: {root_cause}");
+    }
+
     if chain.peek().is_some() {
-        println!("  Caused by:");
-        for err in chain {
-            println!("  > {err}");
+        let last = chain.len() - 1;
+        println!("Trace:");
+        for (i, err) in chain.enumerate() {
+            for _ in 0..i {print!(" ")}
+            if i == last {
+                println!("└─ {err}");
+            } else if i == 0 {
+                println!(" ┌ {err}");
+            } else {
+                println!("└┬ {err}");
+            }
         }
     }
 }

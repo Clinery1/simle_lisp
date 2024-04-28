@@ -1,1 +1,16 @@
-(println "Hello!")
+(defn fizzBuzz
+    ([max] (fizzBuzz max 0))
+
+    ([max i]
+        (def five (= 0 (% i 5)))
+        (def three (= 0 (% i 3)))
+        (cond
+            ((and five three) (println "FizzBuzz"))
+            (three (println "Fizz"))
+            (five (println "Buzz"))
+            (else (println i)))
+        (set i (+ 1 i))
+        (fizzBuzz max i)))
+
+
+(fizzBuzz 50)
