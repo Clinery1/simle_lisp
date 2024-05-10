@@ -43,8 +43,11 @@ pub const BUILTINS: &[(&str, NativeFn)] = &[
     builtin!(modulo, %),
 
     builtin!(equal, =),
+    builtin!(not_equal, !=),
     builtin!(greater, >),
     builtin!(less, <),
+    builtin!(greater_equal, >=),
+    builtin!(less_equal, <=),
 ];
 
 

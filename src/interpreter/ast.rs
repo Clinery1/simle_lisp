@@ -24,6 +24,7 @@ const IS_TAIL: bool = true;
 const NOT_TAIL: bool = false;
 
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum Instruction {
     Nop,
@@ -75,6 +76,43 @@ pub enum FnSignature {
         any: Option<(Vector, InstructionId)>,
     },
 }
+impl FnSignature {
+    pub fn match_arg_count(&self, count: usize)->Option<(&Vector, InstructionId)> {
+        match self {
+            Self::Single{params, body_ptr}=>{
+                if params.items.len() > count {
+                    return None;
+                }
+                if params.items.len() < count && params.remainder.is_none() {
+                    return None;
+                }
+                
+                return Some((params, *body_ptr));
+            },
+            Self::Multi{exact, max_exact, at_least, any}=>{
+                if count <= *max_exact {
+                    for (param_count, (params, body_ptr)) in exact.iter() {
+                        if count == *param_count {
+                            return Some((params, *body_ptr));
+                        }
+                    }
+                }
+
+                for (min_param_count, (params, body_ptr)) in at_least.iter() {
+                    if count >= *min_param_count {
+                        return Some((params, *body_ptr));
+                    }
+                }
+
+                if let Some((params, body_ptr)) = any {
+                    return Some((params, *body_ptr));
+                }
+
+                return None;
+            },
+        }
+    }
+}
 
 
 define_keys!(FnId);
@@ -82,6 +120,7 @@ define_keys!(FnId);
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct InstructionId(usize);
+#[allow(dead_code)]
 impl InstructionId {
     pub const fn invalid()->Self {
         InstructionId(usize::MAX)
@@ -90,6 +129,8 @@ impl InstructionId {
     pub const fn is_valid(&self)->bool {
         self.0 != usize::MAX
     }
+
+    pub const fn inner(&self)->usize {self.0}
 }
 
 #[derive(Debug, PartialEq)]
@@ -134,6 +175,7 @@ pub struct InstructionStore {
     /// from here.
     ins_order: IndexSet<InstructionId, FnvBuildHasher>,
 }
+#[allow(dead_code)]
 impl InstructionStore {
     pub fn new()->Self {
         InstructionStore {
@@ -208,6 +250,7 @@ pub struct InstructionIter<'a> {
     inner: &'a InstructionStore,
     index: usize,
 }
+#[allow(dead_code)]
 impl<'a> InstructionIter<'a> {
     pub fn jump(&mut self, id: InstructionId) {
         let index = self.inner.ins_order
@@ -215,6 +258,20 @@ impl<'a> InstructionIter<'a> {
             .expect("Invalid ID");
 
         self.index = index;
+    }
+
+    pub fn next_ins_id(&self)->Option<InstructionId> {
+        self.inner.ins_order.get_index(self.index).copied()
+    }
+
+    pub fn cur_ins_id(&self)->Option<InstructionId> {
+        self.inner.ins_order.get_index(self.index.saturating_sub(1)).copied()
+    }
+
+    pub fn peek(&self)->&Instruction {
+        let id = self.inner.ins_order.get_index(self.index).unwrap();
+
+        &self.inner.instructions[id.0]
     }
 }
 impl<'a> Iterator for InstructionIter<'a> {
@@ -233,6 +290,7 @@ pub struct ConvertState<'a> {
     pub instructions: InstructionStore,
     pub todo_fns: Vec<(FnId, RefFn<'a>)>,
 }
+#[allow(dead_code)]
 impl<'a> ConvertState<'a> {
     pub fn intern(&mut self, s: &'a str)->Ident {
         self.interner.intern(s)
@@ -355,7 +413,7 @@ pub fn convert<'a>(old: Vec<RefExpr<'a>>)->ConvertState<'a> {
         todo_fns: Vec::new(),
     };
 
-    convert_exprs(&mut state, old, IS_TAIL);
+    convert_exprs(&mut state, old, false);
 
     state.push_exit();
     
@@ -409,25 +467,29 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
             for (condition, body) in conditions {
                 if let Some(id) = prev_jf {
                     let this_id = state.next_ins_id();
-                    state.instructions.insert_before(id, Instruction::JumpIfFalse(this_id));
+                    state.instructions.set(id, Instruction::JumpIfFalse(this_id));
                 }
                 
                 convert_single_expr(state, condition, NOT_TAIL);
 
-                prev_jf = Some(state.next_ins_id());
+                let id = state.instructions.push(Instruction::Exit);
+                prev_jf = Some(id);
 
                 convert_single_expr(state, body, is_tail);
+
                 if is_tail {
                     state.push_return();
-                }
+                } else {
+                    let id = state.instructions.push(Instruction::Exit);
 
-                jump_ends.push(state.next_ins_id());
+                    jump_ends.push(id);
+                }
             }
 
             // if there were conditions, set the last if-false jump
             if let Some(id) = prev_jf {
                 let this_id = state.next_ins_id();
-                state.instructions.insert_before(id, Instruction::JumpIfFalse(this_id));
+                state.instructions.set(id, Instruction::JumpIfFalse(this_id));
             }
 
             if let Some(default) = default {
@@ -437,10 +499,16 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
                 }
             }
 
-            // set all of the jump-after-body instructions for the conditions
-            let ins = Instruction::Jump(state.next_ins_id());
-            for loc in jump_ends {
-                state.instructions.insert_before(loc, ins.clone());
+            if !is_tail {
+                // set all of the jump-after-body instructions for the conditions
+                let id = state.next_ins_id();
+                let ins = Instruction::Jump(id);
+
+                for loc in jump_ends {
+                    state.instructions.set(loc, ins.clone());
+                }
+            } else {
+                assert!(jump_ends.is_empty());
             }
         },
         RefExpr::Splat(expr)=>{
@@ -472,7 +540,6 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
 }
 
 fn convert_fn<'a>(state: &mut ConvertState<'a>, func: RefFn<'a>, id: FnId) {
-    let start_ins_id = state.next_ins_id();
     let name = func.name.map(|n|state.intern(n));
     let sig = convert_signature(state, func.signature);
     let captures = func.captures

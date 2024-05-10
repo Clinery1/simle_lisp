@@ -39,6 +39,7 @@ pub enum Data {
 impl From<DataRef> for Data {
     fn from(dr: DataRef)->Self {Self::Ref(dr)}
 }
+#[allow(dead_code)]
 impl Data {
     pub const MAX_REF_ITERS: usize = 65536;
 
@@ -49,6 +50,18 @@ impl Data {
             Self::Closure{captures,..}=>refs.extend(captures.iter().copied().map(|(_,c)|c)),
             _=>{},
         }
+    }
+
+    /// Clones the data and follows any references until we reach solid data
+    pub fn deref_clone(mut self)->Self {
+        loop {
+            match self {
+                Self::Ref(r)=>self = r.get_data().clone(),
+                _=>break,
+            }
+        }
+
+        return self;
     }
 }
 
@@ -73,21 +86,30 @@ impl PartialEq for DataRef {
         l.eq(&r)
     }
 }
+#[allow(dead_code)]
 impl DataRef {
-    pub fn new(db: DataBox)->Self {
-        use std::alloc::{Layout, alloc};
+    fn new(db: DataBox)->Self {
+        use std::{
+            alloc::{Layout, alloc},
+            mem::MaybeUninit,
+        };
 
+        // println!("Create layout");
         let layout = Layout::new::<DataBox>();
 
-        let mut ptr = NonNull::new(unsafe {alloc(layout) as *mut DataBox})
-            .expect("Allocation failed");
+        // println!("Raw ptr");
+        let raw_ptr = unsafe {alloc(layout) as *mut MaybeUninit<DataBox>};
+        // println!("NonNull ptr");
+        let mut ptr = NonNull::new(raw_ptr).expect("Allocation failed");
 
+        // println!("Unsafe set data at ptr");
         unsafe {
-            *ptr.as_mut() = db;
+            ptr.as_mut().write(db);
         }
 
+        // println!("Return");
         return DataRef {
-            inner: ptr,
+            inner: ptr.cast(),
         };
     }
 
@@ -123,16 +145,16 @@ impl DataRef {
         self.get_data_box().external.get()
     }
 
-    /// SAFETY: The caller ensures that the data pointed to by this ref is inaccessible and **WILL BE
-    /// DEALLOCATED** immediately
-    pub unsafe fn dealloc(self) {
-        use std::alloc::{Layout, dealloc};
+    // /// SAFETY: The caller ensures that the data pointed to by this ref is inaccessible and **WILL BE
+    // /// DEALLOCATED** immediately
+    // pub unsafe fn dealloc(self) {
+    //     use std::alloc::{Layout, dealloc};
 
-        let ptr = self.inner.as_ptr() as *mut u8;
-        let layout = Layout::new::<DataBox>();
+    //     let ptr = self.inner.as_ptr() as *mut u8;
+    //     let layout = Layout::new::<DataBox>();
 
-        dealloc(ptr, layout);
-    }
+    //     dealloc(ptr, layout);
+    // }
 
     /// SAFETY: This is a garbage collected value, so unless we have a bug in the GC, we don't
     /// deallocate until we are sure all ACCESSIBLE pointers are gone. We *can* have *inaccessible*
@@ -143,6 +165,7 @@ impl DataRef {
     }
 }
 
+#[allow(dead_code)]
 struct DataBox {
     inner: RefCell<Data>,
     pinned: bool,
@@ -159,6 +182,7 @@ impl DataBox {
         }
     }
 
+    #[allow(dead_code)]
     pub fn pinned(data: Data)->Self {
         DataBox {
             inner: RefCell::new(data),
@@ -174,11 +198,13 @@ impl From<Data> for DataBox {
 
 // TODO: Implement a GC to actually dealloc the data
 /// A safe way to store a 
+#[allow(dead_code)]
 pub struct DataStore {
     datas: Vec<DataRef>,
     capacity: usize,
     generation: u64,
 }
+#[allow(dead_code)]
 impl DataStore {
     pub fn new()->Self {
         DataStore {
@@ -189,10 +215,14 @@ impl DataStore {
     }
 
     pub fn insert(&mut self, data: Data)->DataRef {
+        // println!("Create box");
         let db = DataBox::new(data);
+        // println!("Create ref");
         let dr = DataRef::new(db);
 
+        // println!("Before push");
         self.datas.push(dr);
+        // println!("After push");
 
         return dr;
     }
@@ -209,14 +239,14 @@ impl DataStore {
         return dr;
     }
 
-    pub fn collect(&mut self)->usize {
-        self.generation += 1;
-        let generation = self.generation;
+    // pub fn collect(&mut self)->usize {
+    //     self.generation += 1;
+    //     let generation = self.generation;
 
-        let mut free_count = 0;
+    //     let mut free_count = 0;
 
-        todo!("Data GC collect");
+    //     todo!("Data GC collect");
 
-        // return free_count;
-    }
+    //     // return free_count;
+    // }
 }

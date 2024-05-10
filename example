@@ -1,27 +1,31 @@
-(+ 1 2)
-
-
-(defn println {a_var}
-    ([& args]
-        (print ...args "\n"))
+(defn println
+    ([& args] (print ...args "\n"))
     ([] (print "\n")))
-; 
-; 
-; (defn fizzBuzz
-;     ([max] (fizzBuzz max 1))
-; 
-;     ([max i]
-;         (def five (= 0 (% i 5)))
-;         (def three (= 0 (% i 3)))
+
+
+; (defn fib
+;     ([max]
 ;         (cond
-;             ((and five three) (println "FizzBuzz"))
-;             (three (println "Fizz"))
-;             (five (println "Buzz"))
-;             (else (println i)))
-; 
+;             ((< max 1) 0)
+;             (else (recur max 1 0 1))))
+;     ([max i prev1 prev2]
 ;         (cond
-;             ((< (+ i 1) max)
-;                 (fizzBuzz max (+ 1 i))))))
-; 
-; 
-; (fizzBuzz 30)
+;             ((< i max) (recur max (+ 1 i) prev2 (+ prev1 prev2)))
+;             (else prev1))))
+
+(defn fizzBuzz
+    ([max] (recur max 1))
+    ([max i]
+        (def three (= 0 (% i 3)))
+        (def five (= 0 (% i 5)))
+        (cond
+            ((<= i max) (begin
+                (cond
+                    ((and three five) (println "FizzBuzz"))
+                    (three (println "Fizz"))
+                    (five (println "Buzz"))
+                    (else (println i)))
+                (recur max (+ 1 i)))))))
+
+(fizzBuzz 30)
+; (println (fib 19))

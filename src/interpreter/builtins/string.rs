@@ -40,7 +40,7 @@ pub fn format_data(fmt: &mut String, data: &Data) {
             write!(fmt, "(").unwrap();
             for (i, data) in items.into_iter().enumerate() {
                 if i > 0 {write!(fmt, " ").unwrap()}
-                format_data(fmt, data);
+                format_data(fmt, &data.get_data());
             }
         },
         Data::Fn(_)|Data::Closure{..}=>write!(fmt, "<fn>").unwrap(),

@@ -10,7 +10,7 @@ use std::{
     time::Instant,
 };
 use interpreter::*;
-use interpreter::ast::Instruction;
+// use interpreter::ast::Instruction;
 
 
 mod lexer;
@@ -22,38 +22,47 @@ mod interpreter;
 fn main() {
     let source = read_to_string("example").unwrap();
 
-    let parse_start = Instant::now();
     let mut parser = parser::new_parser(source.as_str());
-    let end = parse_start.elapsed();
-    println!("Parse time: {end:?}");
-    let size = source.len() as f32;
-    let time = end.as_secs_f32();
-    let speed = size / (time * (1024.0 * 1024.0));
-    println!("{speed}MB/s");
 
+    let parse_start = Instant::now();
     match parser.parse_all() {
         Ok(exprs)=>{
+            let end = parse_start.elapsed();
+            println!("Parse time: {end:?}");
+            let size = source.len() as f32;
+            let time = end.as_secs_f32();
+            let speed = size / (time * (1024.0 * 1024.0));
+            println!("{speed}MB/s");
+
             // for expr in exprs.iter() {
             //     println!("{expr:#?}");
             // }
 
-            let (mut interpreter, interner) = Interpreter::new(exprs);
+            let (mut interpreter, state) = Interpreter::new(exprs);
 
-            for ins in interpreter.instructions.iter() {
-                match ins {
-                    Instruction::Nop=>break,
-                    _=>{},
-                }
-                println!("{:?}", ins);
-            }
+            // let mut iter = state.instructions.iter();
+            // let mut i = 0;
+            // while let Some(ins) = iter.next() {
+            //     let id = iter.cur_ins_id().unwrap();
+            //     match ins {
+            //         Instruction::Nop=>break,
+            //         _=>{},
+            //     }
+            //     println!("#{i:<3.} Id({:3.}) > {:?}", id.inner(), ins);
 
-            let interp_start = Instant::now();
-            let res = interpreter.run(&interner);
-            let end = interp_start.elapsed();
+            //     i += 1;
+            // }
+
+            println!("----------------- Start execution -----------------");
+
+            let res = interpreter.run(&state);
+            println!("-----------------  End execution  -----------------");
             match res {
                 Ok(res)=>{
                     println!("> {res:?}");
-                    println!("Interp time: {end:?}");
+                    println!("Max call stack depth: {}", interpreter.metrics.max_call_stack_depth);
+                    println!("Instruction count: {}", interpreter.metrics.instructions_executed);
+                    println!("Runtime: {:?}", interpreter.metrics.total_run_time);
                 },
                 Err(e)=>error_trace(e, &source, "example"),
             }
