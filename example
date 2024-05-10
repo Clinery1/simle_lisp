@@ -1,8 +1,14 @@
-(println "Hello, world!")
+(+ 1 2)
 
 
+(defn println {a_var}
+    ([& args]
+        (print ...args "\n"))
+    ([] (print "\n")))
+; 
+; 
 ; (defn fizzBuzz
-;     ([max] (fizzBuzz max 0))
+;     ([max] (fizzBuzz max 1))
 ; 
 ;     ([max i]
 ;         (def five (= 0 (% i 5)))
@@ -12,8 +18,10 @@
 ;             (three (println "Fizz"))
 ;             (five (println "Buzz"))
 ;             (else (println i)))
-;         (set i (+ 1 i))
-;         (fizzBuzz max i)))
+; 
+;         (cond
+;             ((< (+ i 1) max)
+;                 (fizzBuzz max (+ 1 i))))))
 ; 
 ; 
-; (fizzBuzz 50)
+; (fizzBuzz 30)

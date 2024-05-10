@@ -4,7 +4,6 @@
 use parser_helper::{
     LogosTokenStream,
     LookaheadLexer,
-    Span,
     SimpleError,
     new_parser,
 };
@@ -20,6 +19,7 @@ use crate::{
 };
 
 
+#[allow(unused)]
 macro_rules! todo {
     ($data:literal)=>{
         bail!(concat!("(", file!(), ")", "[", line!(), ":", column!(), "]", " TODO: ", $data))
@@ -34,7 +34,7 @@ macro_rules! todo {
 pub type ParseResult<T> = std::result::Result<T, SimpleError<String>>;
 
 
-new_parser!(pub struct MyParser<'a, 2, Token<'a>, LogosTokenStream<'a, Token<'a>>>);
+new_parser!(pub struct MyParser<'a, 1, Token<'a>, LogosTokenStream<'a, Token<'a>>>);
 impl<'a> MyParser<'a> {
     #[inline]
     fn next(&mut self)->Token<'a> {
@@ -44,11 +44,6 @@ impl<'a> MyParser<'a> {
     #[inline]
     fn peek(&mut self)->&Token<'a> {
         self.lookahead(0)
-    }
-
-    #[inline]
-    fn peek1(&mut self)->&Token<'a> {
-        self.lookahead(1)
     }
 
     #[inline]
@@ -92,12 +87,18 @@ impl<'a> MyParser<'a> {
         }
     }
 
-    fn try_end_vector(&mut self)->bool {
-        if self.peek() == &Token::Vector(End) {
-            self.next();
-            return true;
+    fn start_squiggle(&mut self)->ParseResult<()> {
+        match self.next() {
+            Token::Squiggle(Start)=>Ok(()),
+            _=>Err(self.error("Expected `{`")),
         }
-        return false;
+    }
+
+    fn end_squiggle(&mut self)->ParseResult<()> {
+        match self.next() {
+            Token::Squiggle(End)=>Ok(()),
+            _=>Err(self.error("Expected `}`")),
+        }
     }
 
     fn match_ident(&mut self, i: &str)->ParseResult<()> {
@@ -148,11 +149,15 @@ impl<'a> MyParser<'a> {
             Token::Quote=>self.parse_expr_quoted()
                 .map(Box::new)
                 .map(Expr::Quote),
+            Token::Splat=>self.parse_expr()
+                .map(Box::new)
+                .map(Expr::Splat),
 
             Token::List(Start)=>bail!(format!("[{}] Unreachable code!", line!())),
             Token::List(End)=>bail!(self.error("Unexpected `)`")),
             // NOTE: Maybe change this?
             Token::Vector(_)=>bail!(self.error("Vectors are not allowed here")),
+            Token::Squiggle(_)=>bail!(self.error("Squiggles are not allowed here")),
             Token::EOF=>bail!(self.error("Unexpected EOF")),
         }
     }
@@ -212,6 +217,11 @@ impl<'a> MyParser<'a> {
             .context("Defn name")?;
 
         let data = self.parse_fn_inner()
+            .map(|(captures, signature)|Expr::Fn(Fn {
+                name: Some(name),
+                captures,
+                signature,
+            }))
             .map(Box::new)
             .context("Defn inner")?;
 
@@ -224,14 +234,25 @@ impl<'a> MyParser<'a> {
     fn parse_fn(&mut self)->Result<Expr<'a>> {
         self.match_ident("fn")?;
 
-        return self.parse_fn_inner();
+        let (captures, signature) = self.parse_fn_inner()?;
+        return Ok(Expr::Fn(Fn {
+            name: None,
+            captures,
+            signature,
+        }));
     }
 
-    fn parse_fn_inner(&mut self)->Result<Expr<'a>> {
+    fn parse_fn_inner(&mut self)->Result<(Option<Squiggle<'a>>, FnSignature<'a>)> {
+        let captures = match self.peek() {
+            Token::Squiggle(Start)=>Some(self.parse_squiggle()?),
+            Token::Squiggle(End)=>bail!(self.error("Unexpected closing squiggle")),
+            _=>None,
+        };
+
         match self.peek() {
             Token::List(Start)=>{},    // we are an overloaded function, so continue.
             Token::Vector(Start)=>return self.parse_fn_param_body()
-                .map(Expr::Fn),
+                .map(|(param, body)|(captures, FnSignature::Single(param, body))),
             _=>{
                 self.next();
                 bail!(self.error("Unexpected token. Expected `(` or `[`"));
@@ -241,23 +262,23 @@ impl<'a> MyParser<'a> {
         let variants = self.parse_end_listed_items(Self::parse_fn_overload_variant)
             .context("Fn overload variants")?;
 
-        return Ok(Expr::MultiFn(variants));
+        return Ok((captures, FnSignature::Multi(variants)));
     }
 
-    fn parse_fn_overload_variant(&mut self)->Result<Fn<'a>> {
+    fn parse_fn_overload_variant(&mut self)->Result<(Vector<'a>, Vec<Expr<'a>>)> {
         self.start_list()?;
 
         return self.parse_fn_param_body();
     }
 
-    fn parse_fn_param_body(&mut self)->Result<Fn<'a>> {
+    fn parse_fn_param_body(&mut self)->Result<(Vector<'a>, Vec<Expr<'a>>)> {
         let params = self.parse_vector()
             .context("Fn params")?;
 
         let body = self.parse_end_listed_items(Self::parse_expr)
             .context("Fn body")?;
 
-        return Ok(Fn{params, body});
+        return Ok((params, body));
     }
 
     fn parse_cond(&mut self)->Result<Expr<'a>> {
@@ -302,9 +323,15 @@ impl<'a> MyParser<'a> {
         let name = self.ident()
             .context("Def name")?;
 
-        let data = self.parse_expr()
+        let mut data = self.parse_expr()
             .map(Box::new)
             .context("Def data")?;
+
+        // set the name if data is a function
+        match &mut *data {
+            Expr::Fn(f)=>f.name = Some(name),
+            _=>{},
+        }
 
         self.end_list()
             .context("End def")?;
@@ -347,6 +374,23 @@ impl<'a> MyParser<'a> {
         return Ok(quoted);
     }
 
+    fn parse_squiggle(&mut self)->Result<Squiggle<'a>> {
+        self.start_squiggle()?;
+
+        let mut items = Vec::new();
+
+        while !self.is_next_token(Token::Squiggle(End)) {
+            match self.next() {
+                Token::Ident(i)=>items.push(i),
+                _=>bail!(self.error("Squiggles can only have identifiers")),
+            }
+        }
+
+        self.end_squiggle()?;
+
+        return Ok(Squiggle {items});
+    }
+
     fn parse_vector(&mut self)->Result<Vector<'a>> {
         self.start_vector()?;
 
@@ -386,6 +430,9 @@ impl<'a> MyParser<'a> {
             Token::Quote=>self.parse_expr_quoted()
                 .map(Box::new)
                 .map(Expr::Quote),
+            Token::Splat=>self.parse_expr_quoted()
+                .map(Box::new)
+                .map(Expr::Splat),
 
             Token::List(Start)=>self.parse_end_listed_items(Self::parse_expr_quoted)
                 .map(Expr::List)
@@ -393,8 +440,12 @@ impl<'a> MyParser<'a> {
             Token::Vector(Start)=>self.parse_vector()
                 .map(Expr::Vector)
                 .context("Quoted vector"),
+            Token::Squiggle(Start)=>self.parse_squiggle()
+                .map(Expr::Squiggle)
+                .context("Quoted squiggle"),
 
             Token::Vector(End)=>bail!(self.error("Unexpected `]`")),
+            Token::Squiggle(End)=>bail!(self.error("Unexpected `}`")),
             Token::List(End)=>bail!(self.error("Unexpected `)`")),
             Token::EOF=>bail!(self.error("Unexpected EOF")),
         }

@@ -10,7 +10,7 @@ pub use StartOrEnd::*;
 #[logos(skip "[ \t\r\n]")]
 pub enum Token<'a> {
     /// all but whitespace, (), [], `#`, `'`, and `"`
-    #[regex("[^ \t\r\n()\\[\\]\"'#0-9][^ \t\r\n()\\[\\]\"]*")]
+    #[regex("[^ \t\r\n()\\[\\]{}\"'`~#0-9][^ .\t\r\n()\\[\\]{}\"]*")]
     Ident(&'a str),
 
     #[regex("[0-9][0-9_]*", number)]
@@ -25,6 +25,9 @@ pub enum Token<'a> {
     #[token("'")]
     Quote,
 
+    #[token("...", priority = 10)]
+    Splat,  // ...(and the list went SPLAT!)
+
     #[regex("#[^ \t\r\n()\"]+", strip_first)]
     HashLiteral(&'a str),
 
@@ -35,6 +38,10 @@ pub enum Token<'a> {
     #[token("[", |_|Start)]
     #[token("]", |_|End)]
     Vector(StartOrEnd),
+
+    #[token("{", |_|Start)]
+    #[token("}", |_|End)]
+    Squiggle(StartOrEnd),
 
     #[regex(";[^\n]*", strip_first, priority=10)]
     Comment(&'a str),
@@ -85,6 +92,7 @@ fn string<'a>(l: &mut Lexer<'a, Token<'a>>)->Option<String> {
         l.bump(c.len_utf8());
 
         if escape {
+            escape = false;
             match c {
                 '"'=>s.push('"'),
                 '\\'=>s.push('\\'),

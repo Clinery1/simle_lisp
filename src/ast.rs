@@ -11,7 +11,6 @@ pub enum Expr<'a> {
 
     /// Named function definition is just sugar for `VarDef {init: Fn(...) ...}`
     Fn(Fn<'a>),
-    MultiFn(Vec<Fn<'a>>),
 
     Cond {
         conditions: Vec<(Self, Self)>,
@@ -19,11 +18,13 @@ pub enum Expr<'a> {
     },
 
     Quote(Box<Self>),
+    Splat(Box<Self>),
     Begin(Vec<Self>),
     /// Simply a list of things. May result in executed code, or it may be quoted for storage.
     List(Vec<Self>),
     /// These are only allowed to be in quoted lists
     Vector(Vector<'a>),
+    Squiggle(Squiggle<'a>),
 
     Ident(&'a str),
     Number(i64),
@@ -36,13 +37,26 @@ pub enum Expr<'a> {
 }
 
 #[derive(Debug, PartialEq)]
+pub enum FnSignature<'a> {
+    Single(Vector<'a>, Vec<Expr<'a>>),
+    Multi(Vec<(Vector<'a>, Vec<Expr<'a>>)>),
+}
+
+
+#[derive(Debug, PartialEq)]
 pub struct Vector<'a> {
     pub items: Vec<&'a str>,
     pub remainder: Option<&'a str>,
 }
 
 #[derive(Debug, PartialEq)]
+pub struct Squiggle<'a> {
+    pub items: Vec<&'a str>,
+}
+
+#[derive(Debug, PartialEq)]
 pub struct Fn<'a> {
-    pub params: Vector<'a>,
-    pub body: Vec<Expr<'a>>,
+    pub name: Option<&'a str>,
+    pub captures: Option<Squiggle<'a>>,
+    pub signature: FnSignature<'a>,
 }
