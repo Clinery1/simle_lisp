@@ -1,3 +1,6 @@
+; vim: ft=sexpression
+
+
 (defn println
     ([& args] (print ...args "\n"))
     ([] (print "\n")))

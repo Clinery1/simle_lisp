@@ -4,4 +4,19 @@ full programs. I might fork this language to make a more complete language, but 
 "how fast can I go from zero to FizzBuzz"
 
 # Inspiration
-Scheme, Clojure, and Lua (kinda)
+Scheme, Clojure, and Lua (kinda), and more
+
+# What about syntax highlighting?
+I wrote a tree-sitter grammar! It is located [here](https://github.com/Clinery1/simple_lisp-tree-sitter)!
+
+# Aren't there enough parenthesis in a normal-looking language?
+Probably, but WE NEEDED MORE! It does get tedious after a while, but it is easier than having
+multiple different kinds of character pairs to match across multiple lines. When I get rainbow
+parens working in my files, it should be easier.
+
+# Isn't it easier to have a normal-looking syntax?
+Yes and no. It is harder on the parsing, but maps more closely to the AST if designed correctly.
+For this language, an s-expression language makes certain things easier, like defining overloaded
+functions. Recursion is also more obvious/intuitive (I think) than in a normal language. With the
+s-expression syntax, recursion can use the special `recur` variable to call the current function,
+but that is just a language feature not a syntax feature.
