@@ -1,20 +1,28 @@
-; vim: ft=sexpression
+; (trait Display
+;     (fn fmt [(self Self) (fmt Formatter) (-> FmtResult)]))
 
+; (type Person []
+;     (Object
+;         '(name String)
+;         '(age Number)))
+
+; (defn Display/Person/fmt [(self Self) (f Formatter) (-> FmtResult)]
+;     (.fmt f (.name self) " is " (.age self) " years old"))
 
 (defn println
     ([& args] (print ...args "\n"))
     ([] (print "\n")))
 
 
-; (defn fib
-;     ([max]
-;         (cond
-;             ((< max 1) 0)
-;             (else (recur max 1 0 1))))
-;     ([max i prev1 prev2]
-;         (cond
-;             ((< i max) (recur max (+ 1 i) prev2 (+ prev1 prev2)))
-;             (else prev1))))
+(defn fib
+    ([max]
+        (cond
+            ((< max 1) 0)
+            (else (recur max 0 0 1))))
+    ([max i prev1 prev2]
+        (cond
+            ((< i max) (recur max (+ 1 i) prev2 (+ prev1 prev2)))
+            (else prev1))))
 
 (defn fizzBuzz
     ([max] (recur max 1))

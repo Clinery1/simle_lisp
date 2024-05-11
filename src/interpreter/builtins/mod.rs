@@ -2,6 +2,7 @@ use super::{
     Interpreter,
     NativeFn,
     Data,
+    DataRef,
     DEBUG,
 };
 
@@ -30,6 +31,8 @@ pub const BUILTINS: &[(&str, NativeFn)] = &[
     builtin!(gc_collect, gcCollect),
     builtin!(and),
     builtin!(or),
+    builtin!(index),
+    builtin!(list),
 
     // string
     builtin!(print),

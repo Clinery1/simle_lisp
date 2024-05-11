@@ -2,16 +2,25 @@ use anyhow::{
     Error,
     // anyhow,
 };
+use nohash_hasher::{
+    IsEnabled,
+    BuildNoHashHasher,
+};
 use misc_utils::{
     SlotMap,
-    define_keys,
+    Key,
 };
 use indexmap::{
     IndexSet,
     IndexMap,
 };
-use fnv::FnvBuildHasher;
-use std::rc::Rc;
+use std::{
+    hash::{
+        Hasher,
+        Hash,
+    },
+    rc::Rc,
+};
 use crate::ast::{
     Expr as RefExpr,
     Vector as RefVector,
@@ -50,8 +59,8 @@ pub enum Instruction {
 
     /// Checks if the first data in the scope is callable. If so, then it calls it with the
     /// arguments, otherwise everything is pushed into a list and returned.
-    CallOrList,
-    TailCallOrList,
+    Call,
+    TailCall,
     Return,
 
     StartScope,
@@ -70,9 +79,9 @@ pub enum FnSignature {
         body_ptr: InstructionId,
     },
     Multi {
-        exact: IndexMap<usize, (Vector, InstructionId)>,
+        exact: IndexMap<usize, (Vector, InstructionId), BuildNoHashHasher<usize>>,
         max_exact: usize,
-        at_least: IndexMap<usize, (Vector, InstructionId)>,
+        at_least: IndexMap<usize, (Vector, InstructionId), BuildNoHashHasher<usize>>,
         any: Option<(Vector, InstructionId)>,
     },
 }
@@ -114,12 +123,28 @@ impl FnSignature {
     }
 }
 
-
-define_keys!(FnId);
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct FnId(usize);
+impl Hash for FnId {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        hasher.write_usize(self.0);
+    }
+}
+impl Key for FnId {
+    fn from_id(id: usize)->Self {FnId(id)}
+    fn id(&self)->usize {self.0}
+}
+impl IsEnabled for FnId {}
 
 #[repr(transparent)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct InstructionId(usize);
+impl Hash for InstructionId {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        hasher.write_usize(self.0);
+    }
+}
+impl IsEnabled for InstructionId {}
 #[allow(dead_code)]
 impl InstructionId {
     pub const fn invalid()->Self {
@@ -147,8 +172,14 @@ pub struct Fn {
     pub sig: FnSignature,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Ident(usize);
+impl Hash for Ident {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        hasher.write_usize(self.0);
+    }
+}
+impl IsEnabled for Ident {}
 
 #[derive(Debug)]
 pub struct Interner<'a>(IndexSet<&'a str>);
@@ -173,7 +204,7 @@ pub struct InstructionStore {
 
     /// A list of instruction indices describing the order that they execute. Things CAN be removed
     /// from here.
-    ins_order: IndexSet<InstructionId, FnvBuildHasher>,
+    ins_order: IndexSet<InstructionId, BuildNoHashHasher<InstructionId>>,
 }
 #[allow(dead_code)]
 impl InstructionStore {
@@ -301,11 +332,11 @@ impl<'a> ConvertState<'a> {
     }
 
     pub fn call_or_list(&mut self) {
-        self.instructions.push(Instruction::CallOrList);
+        self.instructions.push(Instruction::Call);
     }
 
     pub fn tail_call_or_list(&mut self) {
-        self.instructions.push(Instruction::TailCallOrList);
+        self.instructions.push(Instruction::TailCall);
     }
 
     pub fn push_return(&mut self) {
@@ -570,9 +601,9 @@ fn convert_signature<'a>(state: &mut ConvertState<'a>, sig: RefFnSignature<'a>)-
             return FnSignature::Single{params, body_ptr};
         },
         RefFnSignature::Multi(items)=>{
-            let mut exact = IndexMap::new();
+            let mut exact = IndexMap::default();
             let mut max_exact = 0;
-            let mut at_least = IndexMap::new();
+            let mut at_least = IndexMap::default();
             let mut any = None;
 
             for (params, body) in items {

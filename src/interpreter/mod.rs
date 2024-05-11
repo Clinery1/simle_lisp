@@ -1,19 +1,19 @@
-//! TODO: Tail recursion
-
-
-use fnv::{
-    FnvHashMap,
-    FnvHashSet,
-};
+use nohash_hasher::BuildNoHashHasher;
 use anyhow::{
     // Context,
     Result,
     bail,
 };
 use misc_utils::Stack;
-use std::time::{
-    Duration,
-    Instant,
+use std::{
+    time::{
+        Duration,
+        Instant,
+    },
+    collections::{
+        HashMap,
+        HashSet,
+    },
 };
 use ast::*;
 use data::*;
@@ -24,7 +24,16 @@ mod builtins;
 mod data;
 
 
-pub type NativeFn = fn(Vec<Data>, &mut Interpreter)->Result<Data>;
+pub type NativeFn = fn(Vec<DataRef>, &mut Interpreter)->Result<DataRef>;
+
+pub type IdentMap<T> = HashMap<Ident, T, BuildNoHashHasher<Ident>>;
+pub type IdentSet = HashSet<Ident, BuildNoHashHasher<Ident>>;
+
+// pub type FnIdMap<T> = HashMap<FnId, T, BuildNoHashHasher<Ident>>;
+// pub type FnIdSet = HashSet<FnId, BuildNoHashHasher<Ident>>;
+
+// pub type InsIdMap<T> = HashMap<InstructionId, T, BuildNoHashHasher<Ident>>;
+// pub type InsIdSet = HashSet<InstructionId, BuildNoHashHasher<Ident>>;
 
 
 // const MAX_ITERS: usize = 500;
@@ -32,8 +41,8 @@ const DEBUG: bool = false;
 
 
 pub struct Env {
-    vars: FnvHashMap<Ident, Stack<DataRef>>,
-    scopes: Stack<FnvHashSet<Ident>>,
+    vars: IdentMap<Stack<DataRef>>,
+    scopes: Stack<IdentSet>,
 }
 impl Default for Env {
     fn default()->Self {
@@ -44,14 +53,14 @@ impl Env {
     #[inline]
     pub fn new()->Self {
         Env {
-            vars: FnvHashMap::default(),
+            vars: IdentMap::default(),
             scopes: Stack::new(),
         }
     }
 
     #[inline]
     pub fn push_scope(&mut self) {
-        self.scopes.push(FnvHashSet::default());
+        self.scopes.push(IdentSet::default());
     }
 
     #[inline]
@@ -164,17 +173,13 @@ impl Interpreter {
         bail!("Attempt to access undefined variable: `{}`", interner.get(var));
     }
 
-    pub fn define_var(&mut self, var: Ident, data: Data, interner: &Interner)->Result<Data> {
+    pub fn define_var(&mut self, var: Ident, data: DataRef, interner: &Interner)->Result<()> {
         // println!("Define var {} with data {data:?}", interner.get(var));
 
-        let dr = match data {
-            Data::Ref(r)=>r,
-            d=>self.data.insert(d),
-        };
-        dr.set_external();
+        data.set_external();
 
         if self.env_stack.len() > 0 {
-            match self.env_stack[0].insert(var, dr) {
+            match self.env_stack[0].insert(var, data) {
                 Some(dr)=>{
                     dr.unset_external();
                     bail!("Var `{}` is already defined", interner.get(var));
@@ -182,7 +187,7 @@ impl Interpreter {
                 _=>{},
             }
         } else {
-            match self.root_env.insert(var, dr) {
+            match self.root_env.insert(var, data) {
                 Some(dr)=>{
                     dr.unset_external();
                     bail!("Var `{}` is already defined", interner.get(var));
@@ -191,20 +196,16 @@ impl Interpreter {
             }
         }
 
-        return Ok(Data::Ref(dr));
+        return Ok(());
     }
 
-    pub fn set_var(&mut self, var: Ident, data: Data, interner: &Interner)->Result<Data> {
+    pub fn set_var(&mut self, var: Ident, data: DataRef, interner: &Interner)->Result<()> {
         // println!("Set var {} with data {data:?}", interner.get(var));
 
-        let dr = match data {
-            Data::Ref(r)=>r,
-            d=>self.data.insert(d),
-        };
-        dr.set_external();
+        data.set_external();
 
         if self.env_stack.len() > 0 {
-            match self.env_stack[0].set(var, dr) {
+            match self.env_stack[0].set(var, data) {
                 Ok(dr)=>dr.unset_external(),
                 Err(dr)=>{
                     dr.unset_external();
@@ -212,7 +213,7 @@ impl Interpreter {
                 },
             }
         } else {
-            match self.root_env.set(var, dr) {
+            match self.root_env.set(var, data) {
                 Ok(dr)=>dr.unset_external(),
                 Err(dr)=>{
                     dr.unset_external();
@@ -221,20 +222,25 @@ impl Interpreter {
             }
         }
 
-        return Ok(Data::Ref(dr));
+        return Ok(());
+    }
+
+    #[inline]
+    pub fn alloc(&mut self, data: Data)->DataRef {
+        self.data.insert(data)
     }
 
     // TODO: Make `DataStore` aware of the data in `scopes` and `call_stack` before we do a GC and
     // cause a use-after-free bug
-    pub fn run(&mut self, state: &ConvertState)->Result<Option<Data>> {
+    pub fn run(&mut self, state: &ConvertState)->Result<DataRef> {
         const MAX_ITERS: usize = 10000;
 
         let start = Instant::now();
 
         let mut iter = state.instructions.iter();
 
-        let mut call_stack = Vec::new();
-        let mut scopes = Stack::new();
+        let mut call_stack: Vec<(InstructionId, Stack<Vec<DataRef>>, FnId)> = Vec::new();
+        let mut scopes: Stack<Vec<DataRef>> = Stack::new();
         scopes.push(Vec::new());
 
         let mut ins_count = 0;
@@ -258,14 +264,14 @@ impl Interpreter {
                 I::Exit=>break,
 
                 I::Define(i)=>{
-                    let data = scopes[0].pop().unwrap();
+                    let data = *scopes[0].last().unwrap();
 
-                    scopes[0].push(self.define_var(*i, data, &state.interner)?);
+                    self.define_var(*i, data, &state.interner)?;
                 },
                 I::Set(i)=>{
-                    let data = scopes[0].pop().unwrap();
+                    let data = *scopes[0].last().unwrap();
 
-                    scopes[0].push(self.set_var(*i, data, &state.interner)?);
+                    self.set_var(*i, data, &state.interner)?;
                 },
 
                 I::FnOrClosure(id)=>{
@@ -277,57 +283,52 @@ impl Interpreter {
                             captures.push((*cap, self.get_var(*cap, &state.interner)?));
                         }
 
-                        scopes[0].push(Data::Closure{id: *id, captures});
+                        scopes[0].push(self.alloc(Data::Closure{id: *id, captures}));
                     } else {
-                        scopes[0].push(Data::Fn(*id));
+                        scopes[0].push(self.alloc(Data::Fn(*id)));
                     }
                 },
 
-                I::Var(i)=>scopes[0].push(Data::Ref(self.get_var(*i, &state.interner)?)),
+                I::Var(i)=>scopes[0].push(self.get_var(*i, &state.interner)?),
 
-                I::Number(n)=>scopes[0].push(Data::Number(*n)),
-                I::Float(f)=>scopes[0].push(Data::Float(*f)),
-                I::String(s)=>scopes[0].push(Data::String(s.clone())),
-                I::True=>scopes[0].push(Data::Bool(true)),
-                I::False=>scopes[0].push(Data::Bool(false)),
+                I::Number(n)=>scopes[0].push(self.alloc(Data::Number(*n))),
+                I::Float(f)=>scopes[0].push(self.alloc(Data::Float(*f))),
+                I::String(s)=>scopes[0].push(self.alloc(Data::String(s.clone()))),
+                I::True=>scopes[0].push(self.alloc(Data::Bool(true))),
+                I::False=>scopes[0].push(self.alloc(Data::Bool(false))),
 
                 I::Splat=>{
-                    match scopes[0].pop().map(Data::deref_clone) {
-                        Some(Data::List(items))=>scopes[0].extend(items.into_iter().map(Data::Ref)),
-                        Some(d)=>bail!("Splat only accepts lists! Data: {:?}", d),
+                    match scopes[0].pop() {
+                        // Some(Data::List(items))=>,
+                        Some(d)=>match &*d.get_data() {
+                            Data::List(items)=>scopes[0].extend(items.iter().copied()),
+                            _=>bail!("Splat only accepts lists"),
+                        },
                         None=>bail!("There is no data in the scope! This is probably a bug"),
                     }
                 },
 
-                I::CallOrList=>{
+                I::Call=>{
                     let mut args = scopes.pop().unwrap();
-                    let mut arg0 = args.remove(0);
+                    let arg0 = args.remove(0);
+                    let data = arg0.get_data();
 
-                    loop {
-                        match arg0 {
-                            Data::Ref(r)=>{
-                                arg0 = r.get_data().clone();
-                            },
-                            _=>break,
-                        }
-                    }
-
-                    match arg0 {
+                    match &*data {
                         Data::NativeFn(f)=>scopes[0].push(f(args, self)?),
                         Data::Fn(id)=>{
-                            self.debug_call(id, state);
+                            self.debug_call(*id, state);
 
-                            let func = state.fns.get(id).unwrap();
+                            let func = state.fns.get(*id).unwrap();
 
                             let next_ins_id = iter.next_ins_id().unwrap();
-                            call_stack.push((next_ins_id, scopes, id));
+                            call_stack.push((next_ins_id, scopes, *id));
                             scopes = Stack::new();
                             scopes.push(Vec::new());
                             self.env_stack.push(Env::new());
                             self.env_stack[0].push_scope();
 
                             if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
-                                self.set_func_args(id, params, args, &state.interner)?;
+                                self.set_func_args(*id, params, args, &state.interner)?;
 
                                 iter.jump(body_ptr);
                             } else {
@@ -342,25 +343,25 @@ impl Interpreter {
                                 .max(call_stack.len() as u16);
                         },
                         Data::Closure{id, captures}=>{
-                            self.debug_call(id, state);
+                            self.debug_call(*id, state);
 
-                            let func = state.fns.get(id).unwrap();
+                            let func = state.fns.get(*id).unwrap();
 
                             let next_ins_id = iter.next_ins_id().unwrap();
-                            call_stack.push((next_ins_id, scopes, id));
+                            call_stack.push((next_ins_id, scopes, *id));
                             scopes = Stack::new();
                             scopes.push(Vec::new());
                             self.env_stack.push(Env::new());
                             self.env_stack[0].push_scope();
 
                             for (name, data) in captures {
-                                self.define_var(name, Data::Ref(data), &state.interner)?;
+                                self.define_var(*name, *data, &state.interner)?;
                             }
 
                             self.env_stack[0].push_scope();
 
                             if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
-                                self.set_func_args(id, params, args, &state.interner)?;
+                                self.set_func_args(*id, params, args, &state.interner)?;
 
                                 iter.jump(body_ptr);
                             } else {
@@ -374,37 +375,20 @@ impl Interpreter {
                             self.metrics.max_call_stack_depth = self.metrics.max_call_stack_depth
                                 .max(call_stack.len() as u16);
                         },
-                        arg0=>{
-                            let mut items = Vec::new();
-                            items.push(self.data.insert(arg0));
-
-                            for d in args {
-                                items.push(self.data.insert(d));
-                            }
-
-                            scopes[0].push(Data::List(items));
-                        },
-                    }
+                        _=>bail!("Arg0 is not callable!"),
+                    };
                 },
-                I::TailCallOrList=>{
+                I::TailCall=>{
                     let mut args = scopes.pop().unwrap();
-                    let mut arg0 = args.remove(0);
+                    let arg0 = args.remove(0);
+                    let data = arg0.get_data();
 
-                    loop {
-                        match arg0 {
-                            Data::Ref(r)=>{
-                                arg0 = r.get_data().clone();
-                            },
-                            _=>break,
-                        }
-                    }
-
-                    match arg0 {
+                    match &*data {
                         Data::NativeFn(f)=>scopes[0].push(f(args, self)?),
                         Data::Fn(id)=>{
-                            self.debug_tail_call(id, state);
+                            self.debug_tail_call(*id, state);
 
-                            let func = state.fns.get(id).unwrap();
+                            let func = state.fns.get(*id).unwrap();
 
                             scopes = Stack::new();
                             scopes.push(Vec::new());
@@ -414,7 +398,7 @@ impl Interpreter {
 
                             if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
                                 // println!("Calling function with params: {params:?}");
-                                self.set_func_args(id, params, args, &state.interner)?;
+                                self.set_func_args(*id, params, args, &state.interner)?;
 
                                 iter.jump(body_ptr);
                                 // dbg!(iter.peek());
@@ -427,9 +411,9 @@ impl Interpreter {
                             }
                         },
                         Data::Closure{id, captures}=>{
-                            self.debug_tail_call(id, state);
+                            self.debug_tail_call(*id, state);
 
-                            let func = state.fns.get(id).unwrap();
+                            let func = state.fns.get(*id).unwrap();
 
                             scopes = Stack::new();
                             scopes.push(Vec::new());
@@ -438,13 +422,13 @@ impl Interpreter {
                             self.env_stack[0].push_scope();
 
                             for (name, data) in captures {
-                                self.define_var(name, Data::Ref(data), &state.interner)?;
+                                self.define_var(*name, *data, &state.interner)?;
                             }
 
                             self.env_stack[0].push_scope();
 
                             if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
-                                self.set_func_args(id, params, args, &state.interner)?;
+                                self.set_func_args(*id, params, args, &state.interner)?;
 
                                 iter.jump(body_ptr);
                             } else {
@@ -455,21 +439,12 @@ impl Interpreter {
                                 }
                             }
                         },
-                        arg0=>{
-                            let mut items = Vec::new();
-                            items.push(self.data.insert(arg0));
-
-                            for d in args {
-                                items.push(self.data.insert(d));
-                            }
-
-                            scopes[0].push(Data::List(items));
-                        },
-                    }
+                        _=>bail!("Arg0 is not callable!"),
+                    };
                 },
                 I::Return=>{
                     // dbg!(&scopes);
-                    let last = scopes[0].pop();
+                    let last = scopes[0].pop().unwrap_or_else(||self.alloc(Data::List(Vec::new())));
                     let (ret_id, ret_scopes, fn_id) = call_stack.pop().unwrap();
                     self.debug_return(fn_id, state);
 
@@ -477,9 +452,7 @@ impl Interpreter {
 
                     iter.jump(ret_id);
                     scopes = ret_scopes;
-                    if let Some(data) = last {
-                        scopes[0].push(data);
-                    }
+                    scopes[0].push(last);
                 },
 
                 I::StartScope=>{
@@ -500,20 +473,20 @@ impl Interpreter {
                 },
 
                 I::JumpIfTrue(id)=>{
-                    let data = scopes[0].pop().unwrap().deref_clone();
+                    let data = scopes[0].pop().unwrap();
                     // println!("JumpIfTrue condition: {data:?}");
-                    if data == Data::Bool(true) {
-                        // println!("Jump to {id:?}");
-                        iter.jump(*id);
-                    }
+                    match *data.get_data() {
+                        Data::Bool(true)=>iter.jump(*id),
+                        _=>{},
+                    };
                 },
                 I::JumpIfFalse(id)=>{
-                    let data = scopes[0].pop().unwrap().deref_clone();
+                    let data = scopes[0].pop().unwrap();
                     // println!("JumpIfFalse condition: {data:?}");
-                    if data == Data::Bool(false) {
-                        // println!("Jump to {id:?}");
-                        iter.jump(*id);
-                    }
+                    match *data.get_data() {
+                        Data::Bool(false)=>iter.jump(*id),
+                        _=>{},
+                    };
                 },
                 I::Jump(id)=>iter.jump(*id),
             }
@@ -524,13 +497,14 @@ impl Interpreter {
         self.metrics.last_run_time = duration;
         self.metrics.total_run_time += duration;
 
-        return Ok(scopes[0].pop());
+        return Ok(scopes[0].pop().unwrap_or_else(||self.alloc(Data::List(Vec::new()))));
     }
 
-    fn set_func_args(&mut self, id: FnId, params: &Vector, args: Vec<Data>, interner: &Interner)->Result<()> {
+    fn set_func_args(&mut self, id: FnId, params: &Vector, args: Vec<DataRef>, interner: &Interner)->Result<()> {
         let mut args_iter = args.into_iter();
 
-        self.define_var(self.recur_ident, Data::Fn(id), interner).unwrap();
+        let dr = self.alloc(Data::Fn(id));
+        self.define_var(self.recur_ident, dr, interner).unwrap();
 
         // set the params
         for (param, data) in params.items.iter().zip(&mut args_iter) {
@@ -539,11 +513,8 @@ impl Interpreter {
 
         // set the vararg
         if let Some(rem) = params.remainder {
-            let mut items = Vec::new();
-            for i in args_iter {
-                items.push(self.data.insert(i));
-            }
-            self.define_var(rem, Data::List(items), interner)?;
+            let dr = self.alloc(Data::List(args_iter.collect()));
+            self.define_var(rem, dr, interner)?;
         }
 
         return Ok(());

@@ -6,28 +6,29 @@ use std::fmt::Write;
 use super::{
     Interpreter,
     Data,
+    DataRef,
     DEBUG,
 };
 
 
-pub fn print(args: Vec<Data>, _: &mut Interpreter)->Result<Data> {
+pub fn print(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     if DEBUG {dbg!(&args);}
     let mut fmt = String::new();
     for arg in args {
-        format_data(&mut fmt, &arg);
+        format_data(&mut fmt, &arg.get_data());
     }
     print!("{fmt}");
 
-    return Ok(Data::String(fmt.into()));
+    return Ok(i.alloc(Data::String(fmt.into())));
 }
 
-pub fn format(args: Vec<Data>, _: &mut Interpreter)->Result<Data> {
+pub fn format(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     let mut fmt = String::new();
     for arg in args {
-        format_data(&mut fmt, &arg);
+        format_data(&mut fmt, &arg.get_data());
     }
 
-    return Ok(Data::String(fmt.into()));
+    return Ok(i.alloc(Data::String(fmt.into())));
 }
 
 pub fn format_data(fmt: &mut String, data: &Data) {
@@ -42,12 +43,9 @@ pub fn format_data(fmt: &mut String, data: &Data) {
                 if i > 0 {write!(fmt, " ").unwrap()}
                 format_data(fmt, &data.get_data());
             }
+            write!(fmt, ")").unwrap();
         },
         Data::Fn(_)|Data::Closure{..}=>write!(fmt, "<fn>").unwrap(),
         Data::NativeFn(_)=>write!(fmt, "<nativeFn>").unwrap(),
-        Data::Ref(data_ref)=>{
-            let dr = data_ref.get_data();
-            format_data(fmt, &dr);
-        },
     }
 }

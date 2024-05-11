@@ -20,7 +20,7 @@ mod interpreter;
 
 
 fn main() {
-    let source = read_to_string("example").unwrap();
+    let source = read_to_string("example.slp").unwrap();
 
     let mut parser = parser::new_parser(source.as_str());
 

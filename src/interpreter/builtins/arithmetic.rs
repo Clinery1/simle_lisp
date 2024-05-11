@@ -2,17 +2,21 @@ use anyhow::{
     Result,
     bail,
 };
-use std::rc::Rc;
+use std::{
+    // ops::{Deref, DerefMut},
+    rc::Rc,
+};
 use super::{
     Interpreter,
     Data,
+    DataRef,
 };
 
 
 macro_rules! define_arithmetic_func {
     ($name: ident, $sym: tt)=>{
-        pub fn $name(args: Vec<Data>, _: &mut Interpreter)->Result<Data> {
-            if args.is_empty() {return Ok(Data::Number(0))}
+        pub fn $name(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+            if args.is_empty() {return Ok(i.alloc(Data::Number(0)))}
 
             let mut iter = args.into_iter();
 
@@ -36,10 +40,10 @@ macro_rules! define_arithmetic_func {
                 return Ok(());
             }
 
-            let mut first = iter.next().unwrap().deref_clone();
+            let mut first = iter.next().unwrap().cloned();
 
             for arg in iter {
-                do_the_thing(&mut first, &arg.deref_clone())?;
+                do_the_thing(&mut first.get_data_mut(), &arg.get_data())?;
             }
 
             return Ok(first);
@@ -48,8 +52,8 @@ macro_rules! define_arithmetic_func {
 }
 
 
-pub fn add(args: Vec<Data>, _: &mut Interpreter)->Result<Data> {
-    if args.is_empty() {return Ok(Data::Number(0))}
+pub fn add(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+    if args.is_empty() {return Ok(i.alloc(Data::Number(0)))}
 
     let mut iter = args.into_iter();
 
@@ -81,117 +85,117 @@ pub fn add(args: Vec<Data>, _: &mut Interpreter)->Result<Data> {
         return Ok(());
     }
 
-    let mut first = iter.next().unwrap().deref_clone();
+    let mut first = iter.next().unwrap().cloned();
 
     for arg in iter {
-        do_the_thing(&mut first, &arg.deref_clone())?;
+        do_the_thing(&mut first.get_data_mut(), &arg.get_data())?;
     }
 
     return Ok(first);
 }
 
-pub fn equal(mut args: Vec<Data>, _: &mut Interpreter)->Result<Data> {
+pub fn equal(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     if args.len() == 0 {
-        return Ok(Data::Bool(true));
+        return Ok(i.alloc(Data::Bool(true)));
     }
 
     let first = args.pop().unwrap();
 
     for arg in args {
-        if arg != first {
-            return Ok(Data::Bool(false));
+        if &*arg.get_data() != &*first.get_data() {
+            return Ok(i.alloc(Data::Bool(false)));
         }
     }
 
-    return Ok(Data::Bool(true));
+    return Ok(i.alloc(Data::Bool(true)));
 }
 
-pub fn not_equal(mut args: Vec<Data>, _: &mut Interpreter)->Result<Data> {
+pub fn not_equal(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     if args.len() == 0 {
-        return Ok(Data::Bool(true));
+        return Ok(i.alloc(Data::Bool(true)));
     }
 
     let first = args.pop().unwrap();
 
     for arg in args {
-        if arg == first {
-            return Ok(Data::Bool(false));
+        if &*arg.get_data() == &*first.get_data() {
+            return Ok(i.alloc(Data::Bool(false)));
         }
     }
 
-    return Ok(Data::Bool(true));
+    return Ok(i.alloc(Data::Bool(true)));
 }
 
-pub fn less_equal(mut args: Vec<Data>, _: &mut Interpreter)->Result<Data> {
+pub fn less_equal(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     if args.len() == 0 {
-        return Ok(Data::Bool(true));
+        return Ok(i.alloc(Data::Bool(true)));
     }
 
-    let first = args.pop().unwrap().deref_clone();
+    let first = args.pop().unwrap();
 
     for arg in args {
-        match (arg.deref_clone(), &first) {
-            (Data::Number(l), Data::Number(r))=>if l > *r {return Ok(Data::Bool(false))},
-            (Data::Float(l), Data::Float(r))=>if l > *r {return Ok(Data::Bool(false))},
-            _=>return Ok(Data::Bool(false)),
+        match (&*arg.get_data(), &*first.get_data()) {
+            (Data::Number(l), Data::Number(r))=>if l > r {return Ok(i.alloc(Data::Bool(false)))},
+            (Data::Float(l), Data::Float(r))=>if l > r {return Ok(i.alloc(Data::Bool(false)))},
+            _=>return Ok(i.alloc(Data::Bool(false))),
         }
     }
 
-    return Ok(Data::Bool(true));
+    return Ok(i.alloc(Data::Bool(true)));
 }
 
-pub fn greater_equal(mut args: Vec<Data>, _: &mut Interpreter)->Result<Data> {
+pub fn greater_equal(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     if args.len() == 0 {
-        return Ok(Data::Bool(true));
+        return Ok(i.alloc(Data::Bool(true)));
     }
 
-    let first = args.pop().unwrap().deref_clone();
+    let first = args.pop().unwrap();
 
     for arg in args {
-        match (arg.deref_clone(), &first) {
-            (Data::Number(l), Data::Number(r))=>if l < *r {return Ok(Data::Bool(false))},
-            (Data::Float(l), Data::Float(r))=>if l < *r {return Ok(Data::Bool(false))},
-            _=>return Ok(Data::Bool(false)),
+        match (&*arg.get_data(), &*first.get_data()) {
+            (Data::Number(l), Data::Number(r))=>if l < r {return Ok(i.alloc(Data::Bool(false)))},
+            (Data::Float(l), Data::Float(r))=>if l < r {return Ok(i.alloc(Data::Bool(false)))},
+            _=>return Ok(i.alloc(Data::Bool(false))),
         }
     }
 
-    return Ok(Data::Bool(true));
+    return Ok(i.alloc(Data::Bool(true)));
 }
 
-pub fn less(mut args: Vec<Data>, _: &mut Interpreter)->Result<Data> {
+pub fn less(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     if args.len() == 0 {
-        return Ok(Data::Bool(true));
+        return Ok(i.alloc(Data::Bool(true)));
     }
 
-    let first = args.pop().unwrap().deref_clone();
+    let first = args.pop().unwrap();
 
     for arg in args {
-        match (arg.deref_clone(), &first) {
-            (Data::Number(l), Data::Number(r))=>if l >= *r {return Ok(Data::Bool(false))},
-            (Data::Float(l), Data::Float(r))=>if l >= *r {return Ok(Data::Bool(false))},
-            _=>return Ok(Data::Bool(false)),
+        match (&*arg.get_data(), &*first.get_data()) {
+            (Data::Number(l), Data::Number(r))=>if l >= r {return Ok(i.alloc(Data::Bool(false)))},
+            (Data::Float(l), Data::Float(r))=>if l >= r {return Ok(i.alloc(Data::Bool(false)))},
+            _=>return Ok(i.alloc(Data::Bool(false))),
         }
     }
 
-    return Ok(Data::Bool(true));
+    return Ok(i.alloc(Data::Bool(true)));
 }
 
-pub fn greater(mut args: Vec<Data>, _: &mut Interpreter)->Result<Data> {
+pub fn greater(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     if args.len() == 0 {
-        return Ok(Data::Bool(true));
+        return Ok(i.alloc(Data::Bool(true)));
     }
 
-    let first = args.pop().unwrap().deref_clone();
+    let first = args.pop().unwrap();
 
     for arg in args {
-        match (arg.deref_clone(), &first) {
-            (Data::Number(l), Data::Number(r))=>if l <= *r {return Ok(Data::Bool(false))},
-            (Data::Float(l), Data::Float(r))=>if l <= *r {return Ok(Data::Bool(false))},
-            _=>return Ok(Data::Bool(false)),
+        match (&*arg.get_data(), &*first.get_data()) {
+            (Data::Number(l), Data::Number(r))=>if l <= r {return Ok(i.alloc(Data::Bool(false)))},
+            (Data::Float(l), Data::Float(r))=>if l <= r {return Ok(i.alloc(Data::Bool(false)))},
+            _=>return Ok(i.alloc(Data::Bool(false))),
         }
     }
 
-    return Ok(Data::Bool(true));
+    return Ok(i.alloc(Data::Bool(true)));
 }
 
 define_arithmetic_func!(sub, -=);

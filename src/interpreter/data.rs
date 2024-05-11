@@ -27,8 +27,6 @@ pub enum Data {
     String(Rc<String>),
     Bool(bool),
 
-    Ref(DataRef),
-
     Fn(FnId),
     NativeFn(NativeFn),
     Closure {
@@ -36,32 +34,16 @@ pub enum Data {
         captures: Vec<(Ident, DataRef)>,
     },
 }
-impl From<DataRef> for Data {
-    fn from(dr: DataRef)->Self {Self::Ref(dr)}
-}
 #[allow(dead_code)]
 impl Data {
     pub const MAX_REF_ITERS: usize = 65536;
 
     pub fn add_data_refs(&self, refs: &mut Vec<DataRef>) {
         match self {
-            Self::Ref(r)=>refs.push(*r),
             Self::List(items)=>refs.extend(items.iter().copied()),
             Self::Closure{captures,..}=>refs.extend(captures.iter().copied().map(|(_,c)|c)),
             _=>{},
         }
-    }
-
-    /// Clones the data and follows any references until we reach solid data
-    pub fn deref_clone(mut self)->Self {
-        loop {
-            match self {
-                Self::Ref(r)=>self = r.get_data().clone(),
-                _=>break,
-            }
-        }
-
-        return self;
     }
 }
 
@@ -113,13 +95,18 @@ impl DataRef {
         };
     }
 
+    pub fn cloned(self)->Self {
+        let inner = self.get_data_box().clone();
+        Self::new(inner)
+    }
+
     #[inline]
-    pub fn get_data(&self)->Ref<Data> {
+    pub fn get_data<'a>(&'a self)->Ref<'a, Data> {
         self.get_data_box().inner.borrow()
     }
 
     #[inline]
-    pub fn get_data_mut(&self)->RefMut<Data> {
+    pub fn get_data_mut<'a>(&'a mut self)->RefMut<'a, Data> {
         self.get_data_box().inner.borrow_mut()
     }
 
@@ -133,12 +120,27 @@ impl DataRef {
         self.get_data_box().generation.set(gen);
     }
 
+    /// Set `external` on the underlying data. This means it will never be collected, but is
+    /// technically different than `pinned`
+    /// NOTE: if this data references any data, then the referenced data
+    /// **WILL NOT BE COLLECTED** until the reference is removed
     pub fn set_external(&self) {
         self.get_data_box().external.set(true);
     }
 
     pub fn unset_external(&self) {
         self.get_data_box().external.set(false);
+    }
+
+    /// Set `pinned` on the underlying data. This means it will never be collected.
+    /// NOTE: if this data references any data, then the referenced data
+    /// **WILL NOT BE COLLECTED** until the reference is removed
+    pub fn set_pinned(&self) {
+        self.get_data_box().pinned.set(true);
+    }
+
+    pub fn unset_pinned(&self) {
+        self.get_data_box().pinned.set(false);
     }
 
     pub fn is_external(&self)->bool {
@@ -160,7 +162,7 @@ impl DataRef {
     /// deallocate until we are sure all ACCESSIBLE pointers are gone. We *can* have *inaccessible*
     /// pointers to the box and still deallocate, because they will never be used again.
     #[inline]
-    fn get_data_box(&self)->&DataBox {
+    fn get_data_box<'a>(&'a self)->&'a DataBox {
         unsafe {self.inner.as_ref()}
     }
 }
@@ -168,15 +170,25 @@ impl DataRef {
 #[allow(dead_code)]
 struct DataBox {
     inner: RefCell<Data>,
-    pinned: bool,
+    pinned: Cell<bool>,
     external: Cell<bool>,
     generation: Cell<u64>,
+}
+impl Clone for DataBox {
+    fn clone(&self)->Self {
+        DataBox {
+            inner: self.inner.clone(),
+            pinned: Cell::new(false),
+            external: Cell::new(false),
+            generation: Cell::new(0),
+        }
+    }
 }
 impl DataBox {
     pub fn new(data: Data)->Self {
         DataBox {
             inner: RefCell::new(data),
-            pinned: false,
+            pinned: Cell::new(false),
             external: Cell::new(false),
             generation: Cell::new(0),
         }
@@ -186,7 +198,7 @@ impl DataBox {
     pub fn pinned(data: Data)->Self {
         DataBox {
             inner: RefCell::new(data),
-            pinned: true,
+            pinned: Cell::new(true),
             external: Cell::new(false),
             generation: Cell::new(0),
         }
@@ -227,17 +239,6 @@ impl DataStore {
         return dr;
     }
 
-    /// Insert some data that will *never* be collected.
-    /// NOTE: if this data references any data, then the referenced data
-    /// **WILL NOT BE COLLECTED** until the reference is removed
-    pub fn insert_pinned(&mut self, data: Data)->DataRef {
-        let db = DataBox::pinned(data);
-        let dr = DataRef::new(db);
-
-        self.datas.push(dr);
-
-        return dr;
-    }
 
     // pub fn collect(&mut self)->usize {
     //     self.generation += 1;
