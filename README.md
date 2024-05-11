@@ -11,8 +11,8 @@ I wrote a tree-sitter grammar! It is located [here](https://github.com/Clinery1/
 
 # Aren't there enough parenthesis in a normal-looking language?
 Probably, but WE NEEDED MORE! It does get tedious after a while, but it is easier than having
-multiple different kinds of character pairs to match across multiple lines. When I get rainbow
-parens working in my files, it should be easier.
+multiple different kinds of character pairs to match across multiple lines. It is easier to match up
+the different parenthesis with rainbow parens.
 
 # Isn't it easier to have a normal-looking syntax?
 Yes and no. It is harder on the parsing, but maps more closely to the AST if designed correctly.
