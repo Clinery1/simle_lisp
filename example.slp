@@ -1,42 +1,192 @@
-; (trait Display
-;     (fn fmt [(self Self) (fmt Formatter) (-> FmtResult)]))
-
-; (type Person []
-;     (Object
-;         '(name String)
-;         '(age Number)))
-
-; (defn Display/Person/fmt [(self Self) (f Formatter) (-> FmtResult)]
-;     (.fmt f (.name self) " is " (.age self) " years old"))
+(defn print [& args]
+    (write stdout (format ...args))
+    None)
 
 (defn println
     ([& args] (print ...args "\n"))
     ([] (print "\n")))
 
 
-(defn fib
-    ([max]
-        (cond
-            ((< max 1) 0)
-            (else (recur max 0 0 1))))
-    ([max i prev1 prev2]
-        (cond
-            ((< i max) (recur max (+ 1 i) prev2 (+ prev1 prev2)))
-            (else prev1))))
+; (defn fib
+;     ([max]
+;         (cond
+;             ((< max 1) 0)
+;             (else (recur max 0 0 1))))
+;     ([max i prev1 prev2]
+;         (cond
+;             ((< i max) (recur max (+ 1 i) prev2 (+ prev1 prev2)))
+;             (else prev1))))
 
-(defn fizzBuzz
-    ([max] (recur max 1))
-    ([max i]
-        (def three (= 0 (% i 3)))
-        (def five (= 0 (% i 5)))
-        (cond
-            ((<= i max) (begin
-                (cond
-                    ((and three five) (println "FizzBuzz"))
-                    (three (println "Fizz"))
-                    (five (println "Buzz"))
-                    (else (println i)))
-                (recur max (+ 1 i)))))))
+; (defn fizzBuzz
+;     ([max] (recur max 1))
+;     ([max i]
+;         (def three (= 0 (% i 3)))
+;         (def five (= 0 (% i 5)))
+;         (cond
+;             ((<= i max) (begin
+;                 (cond
+;                     ((and three five) (println "FizzBuzz"))
+;                     (three (println "Fizz"))
+;                     (five (println "Buzz"))
+;                     (else (println i)))
+;                 (recur max (+ 1 i)))))))
 
-(fizzBuzz 30)
+
+; (fizzBuzz 30)
 ; (println (fib 19))
+
+
+; (defn createCounter
+;     ([] (recur 0))
+;     ([start]
+;         (def i start)
+;         (fn {i} []
+;             (def ret i)
+;             (+= i 1)
+;             ret)))
+
+; (def myCounter (createCounter))
+; (def anotherCounter (createCounter 15))
+
+; (println (myCounter))
+; (println (myCounter))
+; (println (anotherCounter))
+; (println (anotherCounter))
+
+(defn listIter [iterList]
+    (def i 0)
+    (fn {iterList i} []
+        (cond
+            ((< i (length iterList))
+                (begin
+                    (def idx (clone i))
+                    (+= i 1)
+                    (index iterList idx)))
+            (else None))))
+(defn revListIter [iterList]
+    (fn {iterList} []
+        (listPop iterList)))
+
+(defn range [start end]
+    (def i start)
+    (fn {i end} []
+        (cond
+            ((< i end)
+                (begin
+                    (def ret (clone i))
+                    (+= i 1)
+                    ret))
+            (else None))))
+(defn rangeInclusive [start endInclusive]
+    (def i start)
+    (fn {i endInclusive} []
+        (cond
+            ((<= i endInclusive) (begin
+                (def ret (clone i))
+                (+= i 1)
+                ret))
+            (else None))))
+
+(defn forEach [iter func]
+    (def val (iter))
+    (cond
+        ((!= val None) (begin
+            (func val)
+            (recur iter func)))
+        (else None)))
+
+(defn map [iter mapFn]
+    (fn {iter mapFn} []
+        (def val (iter))
+        (cond
+            ((= val None) None)
+            (else (mapFn val)))))
+(defn filter [iter filterFn]
+    (fn {iter filterFn} []
+        (def val (iter))
+        (cond
+            ((= val None) None)
+            (else (cond
+                ((filterFn val) val)
+                (else (recur)))))))
+
+(defn enumerate [iter]
+    (def i 0)
+    (fn {iter i} []
+        (def val (iter))
+        (cond
+            ((= val None) None)
+            (else (begin
+                (def out (list (clone i) val))
+                (+= i 1)
+                out)))))
+
+(defn reduce [iter reduceFn]
+    (def out (iter))
+    (def rec (fn [iter reduceFn out]
+        (def next (iter))
+        (cond
+            ((= next None) out)
+            (else (begin
+                (def out (reduceFn out next))
+                (recur iter reduceFn out))))))
+    (cond
+        ((= out None) None)
+        (else (rec iter reduceFn out))))
+
+(defn sum [iter]
+    (reduce iter +))
+
+(defn addOne [iter]
+    (map iter (fn [i] (+ 1 i))))
+
+(defn fold [iter start foldFn]
+    (def rec (fn [iter start foldFn]
+        (def next (iter))
+        (cond
+            ((= next None) start)
+            (else (begin
+                (def start (foldFn start next))
+                (recur iter start foldFn))))))
+    (rec iter start foldFn))
+
+(defn collectList [iter]
+    (fold
+        iter
+        (list)
+        (fn [collection item] (+ collection item))))
+
+
+(defn iterFizzBuzz [max]
+    (forEach
+        (rangeInclusive 1 max)
+        (fn [i]
+            (def three (= 0 (% i 3)))
+            (def five (= 0 (% i 5)))
+            (cond
+                ((and three five) (println "FizzBuzz"))
+                (three (println "Fizz"))
+                (five (println "Buzz"))
+                (else (println i))))))
+
+; (def myChars (chars "Hello, world!"))
+
+; (def reversed (fold (revListIter myChars) "" (fn [start item] (+= start item))))
+; (println reversed)
+
+
+(def line (readLine stdin))
+(def reversed (fold (revListIter (chars line)) "" +))
+(println reversed)
+
+; (def myData (read (open "example.slp")))
+; (print myData)
+
+; (iterFizzBuzz 30)
+
+
+; (println (sum (range 0 10)))
+
+; (forEach (addOne (range 0 6)) (fn [val] (println val)))
+
+(println "Collected " (gcCollect) " objects")

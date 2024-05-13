@@ -143,7 +143,13 @@ impl<'a> MyParser<'a> {
             Token::Number(n)=>Ok(Expr::Number(n)),
             Token::Float(f)=>Ok(Expr::Float(f)),
             Token::String(s)=>Ok(Expr::String(s)),
-            Token::Ident(i)=>Ok(Expr::Ident(i)),
+            Token::Char(c)=>Ok(Expr::Char(c)),
+            Token::Ident(i)=>if i == "None" {
+                Ok(Expr::None)
+            } else {
+                Ok(Expr::Ident(i))
+            },
+            Token::DotIdent(s)=>Ok(Expr::DotIdent(s)),
             Token::HashLiteral(lit)=>self.match_hash_literal(lit),
             Token::Comment(c)=>Ok(Expr::Comment(c)),
             Token::Quote=>self.parse_expr_quoted()
@@ -183,6 +189,7 @@ impl<'a> MyParser<'a> {
                 "defn"=>return self.parse_defn(),
                 "quote"=>return self.parse_quote(),
                 "begin"=>return self.parse_begin(),
+                "object"=>return self.parse_object(),
                 _=>{},
             },
             _=>{},
@@ -200,6 +207,10 @@ impl<'a> MyParser<'a> {
         items.insert(0, called);
 
         return Ok(Expr::List(items));
+    }
+
+    fn parse_object(&mut self)->Result<Expr<'a>> {
+        todo!();
     }
 
     fn parse_begin(&mut self)->Result<Expr<'a>> {
@@ -424,7 +435,13 @@ impl<'a> MyParser<'a> {
             Token::Number(n)=>Ok(Expr::Number(n)),
             Token::Float(f)=>Ok(Expr::Float(f)),
             Token::String(s)=>Ok(Expr::String(s)),
-            Token::Ident(i)=>Ok(Expr::Ident(i)),
+            Token::Char(c)=>Ok(Expr::Char(c)),
+            Token::DotIdent(s)=>Ok(Expr::DotIdent(s)),
+            Token::Ident(i)=>if i == "None" {
+                Ok(Expr::None)
+            } else {
+                Ok(Expr::Ident(i))
+            },
             Token::HashLiteral(lit)=>self.match_hash_literal(lit),
             Token::Comment(c)=>Ok(Expr::Comment(c)),
             Token::Quote=>self.parse_expr_quoted()

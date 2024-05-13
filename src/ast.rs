@@ -17,6 +17,8 @@ pub enum Expr<'a> {
         default: Option<Box<Self>>,
     },
 
+    Object(Vec<Field<'a>>),
+
     Quote(Box<Self>),
     Splat(Box<Self>),
     Begin(Vec<Self>),
@@ -26,14 +28,24 @@ pub enum Expr<'a> {
     Vector(Vector<'a>),
     Squiggle(Squiggle<'a>),
 
+    DotIdent(&'a str),
     Ident(&'a str),
     Number(i64),
     Float(f64),
     String(String),
+    Char(char),
     True,
     False,
 
     Comment(&'a str),
+
+    None,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Field<'a> {
+    Full(&'a str, Expr<'a>),
+    Shorthand(&'a str),
 }
 
 #[derive(Debug, PartialEq)]

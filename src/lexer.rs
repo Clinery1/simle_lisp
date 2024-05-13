@@ -10,8 +10,11 @@ pub use StartOrEnd::*;
 #[logos(skip "[ \t\r\n]")]
 pub enum Token<'a> {
     /// all but whitespace, (), [], `#`, `'`, and `"`
-    #[regex("[^ \t\r\n()\\[\\]{}\"'`~#0-9][^ .\t\r\n()\\[\\]{}\"]*")]
+    #[regex("[^\\\\ .\t\r\n()\\[\\]{}\"'`~#0-9][^ .\t\r\n()\\[\\]{}\"]*")]
     Ident(&'a str),
+
+    #[regex("\\.[^ .\t\r\n()\\[\\]{}\"]*", strip_first)]
+    DotIdent(&'a str),
 
     #[regex("[0-9][0-9_]*", number)]
     Number(i64),
@@ -21,6 +24,12 @@ pub enum Token<'a> {
 
     #[token("\"", string)]
     String(String),
+
+    #[token("\\space", |_|' ')]
+    #[token("\\newline", |_|'\n')]
+    #[token("\\tab", |_|'\n')]
+    #[token("\\", parse_char)]
+    Char(char),
 
     #[token("'")]
     Quote,
@@ -118,4 +127,10 @@ fn string<'a>(l: &mut Lexer<'a, Token<'a>>)->Option<String> {
 
 fn strip_first<'a>(l: &mut Lexer<'a, Token<'a>>)->&'a str {
     &l.slice()[1..]
+}
+
+fn parse_char<'a>(l: &mut Lexer<'a, Token<'a>>)->Option<char> {
+    let c = l.remainder().chars().next()?;
+    l.bump(c.len_utf8());
+    return Some(c);
 }

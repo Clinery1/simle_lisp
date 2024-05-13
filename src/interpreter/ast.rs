@@ -23,9 +23,10 @@ use std::{
 };
 use crate::ast::{
     Expr as RefExpr,
+    Field as RefField,
+    FnSignature as RefFnSignature,
     Vector as RefVector,
     Fn as RefFn,
-    FnSignature as RefFnSignature,
 };
 
 
@@ -47,10 +48,14 @@ pub enum Instruction {
     FnOrClosure(FnId),
 
     Var(Ident),
+    DotIdent(Ident),
+
+    Object(Vec<Ident>),
 
     Number(i64),
     Float(f64),
-    String(Rc<String>),
+    String(String),
+    Char(char),
     True,
     False,
 
@@ -70,6 +75,8 @@ pub enum Instruction {
     JumpIfTrue(InstructionId),
     JumpIfFalse(InstructionId),
     Jump(InstructionId),
+
+    None,
 }
 
 #[derive(Debug, PartialEq)]
@@ -323,22 +330,27 @@ pub struct ConvertState<'a> {
 }
 #[allow(dead_code)]
 impl<'a> ConvertState<'a> {
+    #[inline]
     pub fn intern(&mut self, s: &'a str)->Ident {
         self.interner.intern(s)
     }
 
+    #[inline]
     pub fn warning(&mut self, err: Error) {
         self.warnings.push(err);
     }
 
+    #[inline]
     pub fn call_or_list(&mut self) {
         self.instructions.push(Instruction::Call);
     }
 
+    #[inline]
     pub fn tail_call_or_list(&mut self) {
         self.instructions.push(Instruction::TailCall);
     }
 
+    #[inline]
     pub fn push_return(&mut self) {
         self.instructions.push(Instruction::Return);
     }
@@ -361,60 +373,94 @@ impl<'a> ConvertState<'a> {
         self.instructions.push(Instruction::Var(ident));
     }
 
+    pub fn dot_ident(&mut self, i: &'a str) {
+        let ident = self.intern(i);
+
+        self.instructions.push(Instruction::DotIdent(ident));
+    }
+
+    #[inline]
     pub fn var(&mut self, i: Ident) {
         self.instructions.push(Instruction::Var(i));
     }
 
+    #[inline]
     pub fn function(&mut self, f: FnId) {
         self.instructions.push(Instruction::FnOrClosure(f));
     }
 
+    #[inline]
     pub fn string(&mut self, s: String) {
-        self.instructions.push(Instruction::String(Rc::new(s)));
+        self.instructions.push(Instruction::String(s));
     }
 
+    #[inline]
     pub fn number(&mut self, n: i64) {
         self.instructions.push(Instruction::Number(n));
     }
 
+    #[inline]
     pub fn float(&mut self, f: f64) {
         self.instructions.push(Instruction::Float(f));
     }
 
+    #[inline]
     pub fn bool_true(&mut self) {
         self.instructions.push(Instruction::True);
     }
 
+    #[inline]
     pub fn bool_false(&mut self) {
         self.instructions.push(Instruction::False);
     }
 
+    #[inline]
     pub fn splat(&mut self) {
         self.instructions.push(Instruction::Splat);
     }
 
+    #[inline]
     pub fn jump(&mut self, i: InstructionId) {
         self.instructions.push(Instruction::Jump(i));
     }
 
+    #[inline]
     pub fn jump_if_true(&mut self, i: InstructionId) {
         self.instructions.push(Instruction::JumpIfTrue(i));
     }
 
+    #[inline]
     pub fn jump_if_false(&mut self, i: InstructionId) {
         self.instructions.push(Instruction::JumpIfFalse(i));
     }
 
+    #[inline]
     pub fn start_scope(&mut self) {
         self.instructions.push(Instruction::StartScope);
     }
 
+    #[inline]
     pub fn end_scope(&mut self) {
         self.instructions.push(Instruction::EndScope);
     }
 
+    #[inline]
     pub fn push_exit(&mut self) {
         self.instructions.push(Instruction::Exit);
+    }
+
+    #[inline]
+    pub fn push_none(&mut self) {
+        self.instructions.push(Instruction::None);
+    }
+
+    #[inline]
+    pub fn char(&mut self, c: char) {
+        self.instructions.push(Instruction::Char(c));
+    }
+
+    pub fn object(&mut self, fields: Vec<Ident>) {
+        self.instructions.push(Instruction::Object(fields));
     }
 
     pub fn add_func(&mut self, f: RefFn<'a>)->FnId {
@@ -424,10 +470,12 @@ impl<'a> ConvertState<'a> {
         return id;
     }
 
+    #[inline]
     pub fn next_ins_id(&self)->InstructionId {
         self.instructions.next_id()
     }
 
+    #[inline]
     pub fn cur_ins_id(&self)->InstructionId {
         self.instructions.current_id()
     }
@@ -470,7 +518,9 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
         RefExpr::Number(n)=>state.number(n),
         RefExpr::Float(f)=>state.float(f),
         RefExpr::String(s)=>state.string(s),
+        RefExpr::Char(c)=>state.char(c),
         RefExpr::Ident(i)=>state.ident(i),
+        RefExpr::DotIdent(i)=>state.dot_ident(i),
         RefExpr::Comment(_)=>{},
         RefExpr::Def{name, data}=>{
             convert_single_expr(state, *data, is_tail);
@@ -481,6 +531,24 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
             convert_single_expr(state, *data, is_tail);
 
             state.set_var(name);
+        },
+        RefExpr::Object(fields)=>{
+            let mut new_fields = Vec::with_capacity(fields.len());
+            for field in fields {
+                match field {
+                    RefField::Shorthand(i)=>{
+                        new_fields.push(state.intern(i));
+                        state.ident(i);
+                    },
+                    RefField::Full(i, expr)=>{
+                        new_fields.push(state.intern(i));
+                        state.start_scope();
+                        convert_single_expr(state, expr, NOT_TAIL);
+                        state.end_scope();
+                    },
+                }
+            }
+            state.object(new_fields);
         },
         RefExpr::Fn(f)=>{
             let fn_id = state.add_func(f);
@@ -564,9 +632,11 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
                 state.call_or_list();
             }
         },
+        RefExpr::None=>state.push_none(),
         RefExpr::Quote(_)=>todo!("Quote conversion"),
         RefExpr::Vector(_)=>todo!("Vector conversion"),
         RefExpr::Squiggle(_)=>todo!("Squiggle conversion"),
+
     }
 }
 

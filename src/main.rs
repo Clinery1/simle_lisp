@@ -10,7 +10,6 @@ use std::{
     time::Instant,
 };
 use interpreter::*;
-// use interpreter::ast::Instruction;
 
 
 mod lexer;
@@ -34,12 +33,13 @@ fn main() {
             let speed = size / (time * (1024.0 * 1024.0));
             println!("{speed}MB/s");
 
-            // for expr in exprs.iter() {
-            //     println!("{expr:#?}");
-            // }
+            for expr in exprs.iter() {
+                println!("{expr:#?}");
+            }
 
             let (mut interpreter, state) = Interpreter::new(exprs);
 
+            // use interpreter::ast::Instruction;
             // let mut iter = state.instructions.iter();
             // let mut i = 0;
             // while let Some(ins) = iter.next() {
@@ -60,9 +60,19 @@ fn main() {
             match res {
                 Ok(res)=>{
                     println!("> {res:?}");
+                    println!("Allocations: {}", interpreter.metrics.allocations);
                     println!("Max call stack depth: {}", interpreter.metrics.max_call_stack_depth);
                     println!("Instruction count: {}", interpreter.metrics.instructions_executed);
                     println!("Runtime: {:?}", interpreter.metrics.total_run_time);
+                    let rt = interpreter.metrics.total_run_time.as_secs_f32();
+                    let ins_per_sec = interpreter.metrics.instructions_executed as f32 / rt;
+                    if ins_per_sec > 1_000_000.0 {
+                        println!("{:.4}M ins/s", ins_per_sec / 1_000_000.0);
+                    } else if ins_per_sec > 1_000.0 {
+                        println!("{:.4}K ins/s", ins_per_sec / 1_000.0);
+                    } else {
+                        println!("{:.2} ins/s", ins_per_sec);
+                    }
                 },
                 Err(e)=>error_trace(e, &source, "example"),
             }
