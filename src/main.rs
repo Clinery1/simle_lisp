@@ -33,11 +33,11 @@ fn main() {
             let speed = size / (time * (1024.0 * 1024.0));
             println!("{speed}MB/s");
 
-            for expr in exprs.iter() {
-                println!("{expr:#?}");
-            }
+            // for expr in exprs.iter() {
+            //     println!("{expr:#?}");
+            // }
 
-            let (mut interpreter, state) = Interpreter::new(exprs);
+            let (mut interpreter, mut state) = Interpreter::new(exprs);
 
             // use interpreter::ast::Instruction;
             // let mut iter = state.instructions.iter();
@@ -55,7 +55,7 @@ fn main() {
 
             println!("----------------- Start execution -----------------");
 
-            let res = interpreter.run(&state);
+            let res = interpreter.run(&mut state);
             println!("-----------------  End execution  -----------------");
             match res {
                 Ok(res)=>{

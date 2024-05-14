@@ -2,10 +2,6 @@ use anyhow::{
     Error,
     // anyhow,
 };
-use nohash_hasher::{
-    IsEnabled,
-    BuildNoHashHasher,
-};
 use misc_utils::{
     SlotMap,
     Key,
@@ -14,11 +10,13 @@ use indexmap::{
     IndexSet,
     IndexMap,
 };
+use fnv::FnvBuildHasher;
 use std::{
     hash::{
         Hasher,
         Hash,
     },
+    // fs::read_to_string,
     rc::Rc,
 };
 use crate::ast::{
@@ -28,6 +26,7 @@ use crate::ast::{
     Vector as RefVector,
     Fn as RefFn,
 };
+// use super::IdentMap;
 
 
 const IS_TAIL: bool = true;
@@ -39,6 +38,9 @@ const NOT_TAIL: bool = false;
 pub enum Instruction {
     Nop,
     Exit,
+
+    ReturnModule,
+    Module(ModuleId),
 
     /// Reads the previous result
     Define(Ident),
@@ -86,9 +88,9 @@ pub enum FnSignature {
         body_ptr: InstructionId,
     },
     Multi {
-        exact: IndexMap<usize, (Vector, InstructionId), BuildNoHashHasher<usize>>,
+        exact: IndexMap<usize, (Vector, InstructionId), FnvBuildHasher>,
         max_exact: usize,
-        at_least: IndexMap<usize, (Vector, InstructionId), BuildNoHashHasher<usize>>,
+        at_least: IndexMap<usize, (Vector, InstructionId), FnvBuildHasher>,
         any: Option<(Vector, InstructionId)>,
     },
 }
@@ -141,7 +143,6 @@ impl Key for FnId {
     fn from_id(id: usize)->Self {FnId(id)}
     fn id(&self)->usize {self.0}
 }
-impl IsEnabled for FnId {}
 
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -151,7 +152,6 @@ impl Hash for InstructionId {
         hasher.write_usize(self.0);
     }
 }
-impl IsEnabled for InstructionId {}
 #[allow(dead_code)]
 impl InstructionId {
     pub const fn invalid()->Self {
@@ -186,20 +186,19 @@ impl Hash for Ident {
         hasher.write_usize(self.0);
     }
 }
-impl IsEnabled for Ident {}
 
 #[derive(Debug)]
-pub struct Interner<'a>(IndexSet<&'a str>);
-impl<'a> Interner<'a> {
+pub struct Interner(IndexSet<String>);
+impl Interner {
     pub fn new()->Self {
         Interner(IndexSet::new())
     }
 
-    pub fn intern(&mut self, s: &'a str)->Ident {
-        Ident(self.0.insert_full(s).0)
+    pub fn intern<S: Into<String>>(&mut self, s: S)->Ident {
+        Ident(self.0.insert_full(s.into()).0)
     }
 
-    pub fn get(&self, i: Ident)->&'a str {
+    pub fn get(&self, i: Ident)->&str {
         self.0.get_index(i.0)
             .expect("Invalid interned ident passed")
     }
@@ -211,7 +210,7 @@ pub struct InstructionStore {
 
     /// A list of instruction indices describing the order that they execute. Things CAN be removed
     /// from here.
-    ins_order: IndexSet<InstructionId, BuildNoHashHasher<InstructionId>>,
+    ins_order: IndexSet<InstructionId, FnvBuildHasher>,
 }
 #[allow(dead_code)]
 impl InstructionStore {
@@ -321,12 +320,32 @@ impl<'a> Iterator for InstructionIter<'a> {
     }
 }
 
+#[allow(dead_code)]
+pub struct Module {
+    start: InstructionId,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ModuleId(usize);
+impl Hash for ModuleId {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        hasher.write_usize(self.0);
+    }
+}
+impl Key for ModuleId {
+    fn from_id(id: usize)->Self {ModuleId(id)}
+    fn id(&self)->usize {self.0}
+}
+
 pub struct ConvertState<'a> {
-    pub interner: Interner<'a>,
+    pub interner: Interner,
     pub fns: SlotMap<FnId, Rc<Fn>>,
     pub warnings: Vec<Error>,
     pub instructions: InstructionStore,
+    pub modules: SlotMap<ModuleId, Module>,
     pub todo_fns: Vec<(FnId, RefFn<'a>)>,
+    pub todo_modules: Vec<(ModuleId, Vec<&'a str>)>,
+    pub module_path: Vec<&'a str>,
 }
 #[allow(dead_code)]
 impl<'a> ConvertState<'a> {
@@ -459,6 +478,7 @@ impl<'a> ConvertState<'a> {
         self.instructions.push(Instruction::Char(c));
     }
 
+    #[inline]
     pub fn object(&mut self, fields: Vec<Ident>) {
         self.instructions.push(Instruction::Object(fields));
     }
@@ -468,6 +488,16 @@ impl<'a> ConvertState<'a> {
         self.todo_fns.push((id, f));
 
         return id;
+    }
+
+    pub fn add_module(&mut self, name: &'a str) {
+        let mut path = self.module_path.clone();
+        path.push(name);
+        assert!(path.len() > 0);
+        let m = self.modules.reserve_slot();
+        self.todo_modules.push((m, path));
+
+        self.instructions.push(Instruction::Module(m));
     }
 
     #[inline]
@@ -489,7 +519,10 @@ pub fn convert<'a>(old: Vec<RefExpr<'a>>)->ConvertState<'a> {
         fns: SlotMap::new(),
         warnings: Vec::new(),
         instructions: InstructionStore::new(),
+        modules: SlotMap::new(),
         todo_fns: Vec::new(),
+        todo_modules: Vec::new(),
+        module_path: Vec::new(),
     };
 
     convert_exprs(&mut state, old, false);
@@ -500,8 +533,18 @@ pub fn convert<'a>(old: Vec<RefExpr<'a>>)->ConvertState<'a> {
         convert_fn(&mut state, f, id);
     }
 
+    // while let  Some((id, path)) = state.todo_modules.pop() {
+    //     convert_module(&mut state, path, id);
+    // }
+
     return state;
 }
+
+// fn convert_module<'a>(state: &mut ConvertState<'a>, path: Vec<&'a str>, id: ModuleId) {
+//     let source = read_to_string(path.iter()
+//         .fold(String::new(), |s, p|s.push_str(p)),
+//     );
+// }
 
 fn convert_exprs<'a>(state: &mut ConvertState<'a>, exprs: Vec<RefExpr<'a>>, is_tail: bool) {
     let last = exprs.len() - 1;
@@ -522,6 +565,10 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
         RefExpr::Ident(i)=>state.ident(i),
         RefExpr::DotIdent(i)=>state.dot_ident(i),
         RefExpr::Comment(_)=>{},
+        RefExpr::Module(i)=>{
+            state.add_module(i);
+            todo!("Modules");
+        },
         RefExpr::Def{name, data}=>{
             convert_single_expr(state, *data, is_tail);
 
@@ -636,7 +683,6 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
         RefExpr::Quote(_)=>todo!("Quote conversion"),
         RefExpr::Vector(_)=>todo!("Vector conversion"),
         RefExpr::Squiggle(_)=>todo!("Squiggle conversion"),
-
     }
 }
 

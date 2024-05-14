@@ -4,13 +4,14 @@ use anyhow::{
 };
 use super::{
     Interpreter,
+    Interner,
     Data,
     DataRef,
     // DEBUG,
 };
 
 
-pub fn split_list(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn split_list(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     if args.len() != 2 {
         bail!("`split` can only take two arguments");
     }

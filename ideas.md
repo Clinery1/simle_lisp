@@ -38,3 +38,5 @@ Example:
 (println example/helloWorld)    ; > "Hello, world!"
 (println example)               ; > <object>
 ```
+
+Modules can either be a file or a folder with a `mod.slp` file in it. Just like with Rust modules.

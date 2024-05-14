@@ -7,9 +7,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.82"
+bitvec = "1.0.1"
 fnv = "1.0.7"
 indexmap = "2.2.6"
 logos = "0.14.0"
 misc_utils = { git = "https://github.com/Clinery1/misc_utils.git", version = "0.4.0" }
-nohash-hasher = "0.2.0"
 parser_helper = { git = "https://github.com/Clinery1/parser_helper.git", version = "0.4.0", features = ["logos"] }

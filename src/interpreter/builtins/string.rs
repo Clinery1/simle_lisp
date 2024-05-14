@@ -5,13 +5,14 @@ use anyhow::{
 use std::fmt::Write;
 use super::{
     Interpreter,
+    Interner,
     Data,
     DataRef,
     // DEBUG,
 };
 
 
-pub fn format(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn format(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     let mut fmt = String::new();
     for arg in args {
         format_data(&mut fmt, &arg.get_data());
@@ -51,7 +52,7 @@ pub fn format_data(fmt: &mut String, data: &Data) {
     }
 }
 
-pub fn chars(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn chars(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     if args.len() != 1 {
         bail!("`chars` can only take one argument");
     }
@@ -69,7 +70,7 @@ pub fn chars(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     }
 }
 
-pub fn split(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn split(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     if args.len() != 2 {
         bail!("`split` can only take two arguments");
     }

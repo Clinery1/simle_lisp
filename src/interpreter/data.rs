@@ -1,8 +1,5 @@
-use nohash_hasher::{
-    BuildNoHashHasher,
-    IsEnabled,
-};
 use indexmap::IndexSet;
+use fnv::FnvBuildHasher;
 use std::{
     cell::{
         RefCell,
@@ -36,11 +33,12 @@ use super::{
     // Metrics,
     NativeFn,
     IdentMap,
+    DEBUG,
     ast::*,
 };
 
 
-type DataRefSet = IndexSet<HashableDataRef, BuildNoHashHasher<HashableDataRef>>;
+type DataRefSet = IndexSet<HashableDataRef, FnvBuildHasher>;
 
 
 thread_local!(
@@ -91,7 +89,6 @@ pub enum Data {
 
     None,
 }
-#[allow(dead_code)]
 impl Data {
     pub fn add_data_refs(&self, refs: &mut DataRefSet) {
         match self {
@@ -142,7 +139,6 @@ impl Data {
 
 #[derive(Copy, Clone)]
 pub struct HashableDataRef(pub DataRef);
-impl IsEnabled for HashableDataRef {}
 /// This is acceptable because we provide a custom version of `PartialEq` that works both ways, AND
 /// on just the pointers themselves.
 impl Eq for HashableDataRef {}
@@ -301,7 +297,6 @@ impl DataRef {
     }
 }
 
-#[allow(dead_code)]
 struct DataBox {
     inner: RefCell<Data>,
     pinned: Cell<bool>,
@@ -328,16 +323,6 @@ impl DataBox {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn pinned(data: Data)->Self {
-        DataBox {
-            inner: RefCell::new(data),
-            pinned: Cell::new(true),
-            external: RefCell::new(0),
-            generation: Cell::new(0),
-        }
-    }
-
     pub fn allocation_size(&self)->usize {
         let data_alloc_size = self.inner.borrow().allocation_size();
 
@@ -349,18 +334,14 @@ impl From<Data> for DataBox {
 }
 
 /// A safe way to store data
-#[allow(dead_code)]
 pub struct DataStore {
     datas: Vec<DataRef>,
-    capacity: usize,
     generation: u64,
 }
-#[allow(dead_code)]
 impl DataStore {
     pub fn new()->Self {
         DataStore {
             datas: Vec::new(),
-            capacity: 256,
             generation: 0,
         }
     }
@@ -465,7 +446,10 @@ impl DataStore {
             todo_list.retain(|i|i.0.get_generation() != generation);
             iter += 1;
         }
-        // eprintln!("DEBUG: Took {iter} iterations to set all reachable datas to the current generation");
+
+        if DEBUG {
+            eprintln!("DEBUG: Took {iter} iterations to set all reachable datas to the current generation");
+        }
 
         let datas = mem::take(&mut self.datas);
         // reserve a quarter of the previous allocations in the new datas vector
@@ -495,7 +479,9 @@ impl DataStore {
 
         DEALLOCATIONS.with_borrow_mut(|d| *d += free_count);
 
-        // eprintln!("Freed {free_count} data entries for a total of ~{dealloc_size} bytes. {} remaining allocations", self.datas.len());
+        if DEBUG {
+            eprintln!("Freed {free_count} data entries for a total of ~{dealloc_size} bytes. {} remaining allocations", self.datas.len());
+        }
 
         return free_count;
     }

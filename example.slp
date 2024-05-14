@@ -169,15 +169,49 @@
                 (five (println "Buzz"))
                 (else (println i))))))
 
+
+(defn newDynList []
+    (object
+        (.$ (object
+            (.len (fn [obj]
+                (obj .__length)))
+            (.push (fn [obj item]
+                (+= (obj .inner) item)
+                (+= (obj .__length) 1)))
+            (.pop (fn [obj]
+                (-= (obj .__length) 1)
+                (listPop (obj .inner))))
+            (.index (fn [obj idx]
+                (index (obj .inner) idx)))))
+        (.inner (list))
+        (.__length 0)))
+
+
+(def myList (newDynList))
+
+(myList .newField 12345)
+(println (myList .newField))
+
+(println (myList .len))
+(myList .push "A string")
+(println (myList .index 0))
+(println (myList .len))
+(println (myList .pop))
+(println (myList .len))
+
+(println (intern .ident))
+
+
 ; (def myChars (chars "Hello, world!"))
 
 ; (def reversed (fold (revListIter myChars) "" (fn [start item] (+= start item))))
 ; (println reversed)
 
 
-(def line (readLine stdin))
-(def reversed (fold (revListIter (chars line)) "" +))
-(println reversed)
+; (def line (readLine stdin))
+; (def reversed (fold (revListIter (chars line)) "" +))
+; (println reversed)
+
 
 ; (def myData (read (open "example.slp")))
 ; (print myData)
@@ -189,4 +223,3 @@
 
 ; (forEach (addOne (range 0 6)) (fn [val] (println val)))
 
-(println "Collected " (gcCollect) " objects")

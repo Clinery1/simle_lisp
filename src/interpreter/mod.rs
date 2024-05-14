@@ -1,9 +1,9 @@
-use nohash_hasher::BuildNoHashHasher;
 use anyhow::{
     // Context,
     Result,
     bail,
 };
+use fnv::FnvBuildHasher;
 use misc_utils::Stack;
 use std::{
     time::{
@@ -28,22 +28,23 @@ use data::*;
 
 pub mod ast;
 mod builtins;
-mod data;
+pub mod data;
+// mod new_data;
 
 
 pub type CallStack = Stack<(InstructionId, Scopes, FnId)>;
 pub type Scopes = Stack<Vec<DataRef>>;
 
-pub type NativeFn = fn(Vec<DataRef>, &mut Interpreter)->Result<DataRef>;
+pub type NativeFn = fn(Vec<DataRef>, &mut Interpreter, &mut Interner)->Result<DataRef>;
 
-pub type IdentMap<T> = HashMap<Ident, T, BuildNoHashHasher<Ident>>;
-pub type IdentSet = HashSet<Ident, BuildNoHashHasher<Ident>>;
+pub type IdentMap<T> = HashMap<Ident, T, FnvBuildHasher>;
+pub type IdentSet = HashSet<Ident, FnvBuildHasher>;
 
-// pub type FnIdMap<T> = HashMap<FnId, T, BuildNoHashHasher<Ident>>;
-// pub type FnIdSet = HashSet<FnId, BuildNoHashHasher<Ident>>;
+// pub type FnIdMap<T> = HashMap<FnId, T, FnvBuildHasher<Ident>>;
+// pub type FnIdSet = HashSet<FnId, FnvBuildHasher<Ident>>;
 
-// pub type InsIdMap<T> = HashMap<InstructionId, T, BuildNoHashHasher<Ident>>;
-// pub type InsIdSet = HashSet<InstructionId, BuildNoHashHasher<Ident>>;
+// pub type InsIdMap<T> = HashMap<InstructionId, T, FnvBuildHasher<Ident>>;
+// pub type InsIdSet = HashSet<InstructionId, FnvBuildHasher<Ident>>;
 
 
 // const MAX_ITERS: usize = 500;
@@ -205,6 +206,7 @@ pub struct Interpreter {
     root_env: Env,
     data: DataStore,
     recur_ident: Ident,
+    vtable_ident: Ident,
     call_stack: CallStack,
     scopes: Scopes,
     var_count: usize,
@@ -248,7 +250,7 @@ impl Interpreter {
         for (name, func, arg_count) in builtins::BUILTINS.into_iter() {
             // println!("NativeFn: {name}");
             // println!("Line: {}", line!());
-            let ident = state.interner.intern(name);
+            let ident = state.interner.intern(*name);
             // println!("Line: {}", line!());
             let data = data.insert(Data::NativeFn(name, *func, *arg_count));
             data.set_pinned();
@@ -275,6 +277,7 @@ impl Interpreter {
             env_stack: Stack::new(),
             data,
             recur_ident: state.interner.intern("recur"),
+            vtable_ident: state.interner.intern("$"),
             call_stack: Stack::new(),
             scopes: Stack::new(),
             metrics: Metrics::default(),
@@ -407,7 +410,7 @@ impl Interpreter {
 
     // TODO: Make `DataStore` aware of the data in `scopes` and `call_stack` before we do a GC and
     // cause a use-after-free bug
-    pub fn run(&mut self, state: &ConvertState)->Result<Option<DataRef>> {
+    pub fn run(&mut self, state: &mut ConvertState)->Result<Option<DataRef>> {
         const MAX_ITERS: usize = 10000;
 
         let start = Instant::now();
@@ -435,6 +438,13 @@ impl Interpreter {
             match ins {
                 I::Nop=>{},
                 I::Exit=>break,
+
+                I::ReturnModule=>{
+                    todo!("Modules");
+                },
+                I::Module(_id)=>{
+                    todo!("Modules");
+                },
 
                 I::Define(i)=>{
                     let data = *self.scopes[0].last().unwrap();
@@ -466,17 +476,17 @@ impl Interpreter {
                     let dr = self.get_var(*i, &state.interner)?;
                     self.push_dr_to_scope(dr);
                 },
-                I::DotIdent(i)=>self.push_to_scope(Data::Ident(*i)),
 
                 I::Object(fields)=>{
                     let mut map = IdentMap::default();
-                    for field in fields.iter().copied() {
+                    for field in fields.iter().rev().copied() {
                         let data = self.pop_from_scope().unwrap();
                         map.insert(field, data);
                     }
                     self.push_to_scope(Data::Object(map));
                 },
 
+                I::DotIdent(i)=>self.push_to_scope(Data::Ident(*i)),
                 I::Number(n)=>self.push_to_scope(Data::Number(*n)),
                 I::Float(f)=>self.push_to_scope(Data::Float(*f)),
                 I::String(s)=>self.push_to_scope(Data::String(s.clone())),
@@ -501,155 +511,242 @@ impl Interpreter {
 
                 I::Call=>{
                     let mut args = self.scopes.pop().unwrap();
-                    let arg0 = args.remove(0);
+                    let mut arg0 = args[0];
                     let data = arg0.get_data();
+                    let mut has_func = true;
 
                     match &*data {
-                        Data::NativeFn(name, f, arg_count)=>{
-                            let dr = match arg_count {
-                                ArgCount::Exact(count)=>if args.len() == *count {
-                                    f(args, self)?
-                                } else {
-                                    bail!("Function `{name}` cannot take {} arguments", args.len());
+                        Data::Object(o)=>{
+                            let mut name = None;
+                            match &*args[1].get_data() {
+                                Data::Ident(i)=>name = Some(*i),
+                                _=>{},
+                            }
+                            match self.get_callable(&*data, name)? {
+                                Some(func)=>{
+                                    args.remove(1);
+                                    drop(data);
+                                    arg0 = func;
                                 },
-                                ArgCount::Any=>f(args, self)?,
-                            };
-                            self.push_dr_to_scope(dr);
+                                _=>{    // field access
+                                    has_func = false;
+                                    let Some(name) = name else {bail!("Cannot call this object")};
+                                    match args.len() {
+                                        // () or (Object)
+                                        0|1=>unreachable!(),
+                                        // Just (Object .field)
+                                        2=>if let Some(field_data) = o.get(&name) {
+                                            self.push_dr_to_scope(*field_data);
+                                        } else {
+                                            bail!("Method/Field `{}` does not exist on object", state.interner.get(name));
+                                        },
+                                        // (Object .field DATA)
+                                        3=>{
+                                            drop(data);
+
+                                            let data = args[2];
+                                            let mut dr_ref = args[0].get_data_mut();
+                                            let Data::Object(fields) = &mut *dr_ref else {unreachable!()};
+
+                                            fields.insert(name, data);
+
+                                            // push the data just assigned to the field back to the scope
+                                            self.push_dr_to_scope(data);
+                                        },
+                                        n=>bail!("Cannot pass more than 1 data to a field index. Got {n} datas"),
+                                    }
+                                },
+                            }
                         },
-                        Data::Fn(id)=>{
-                            self.debug_call(*id, state);
+                        _=>{
+                            args.remove(0);
+                        },
+                    }
 
-                            let func = state.fns.get(*id).unwrap();
+                    if has_func {
+                        let data = arg0.get_data();
 
-                            let next_ins_id = iter.next_ins_id().unwrap();
-                            let old_scopes = replace(&mut self.scopes, Stack::new());
-                            self.call_stack.push((next_ins_id, old_scopes, *id));
-                            self.scopes.push(Vec::new());
-                            self.push_env();
-                            self.push_env_scope();
+                        match &*data {
+                            Data::NativeFn(name, f, arg_count)=>{
+                                let dr = match arg_count {
+                                    ArgCount::Exact(count)=>if args.len() == *count {
+                                        f(args, self, &mut state.interner)?
+                                    } else {
+                                        bail!("Function `{name}` cannot take {} arguments", args.len());
+                                    },
+                                    ArgCount::Any=>f(args, self, &mut state.interner)?,
+                                };
+                                self.push_dr_to_scope(dr);
+                            },
+                            Data::Fn(id)=>{
+                                self.debug_call(*id, state);
 
-                            if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
-                                self.set_func_args(*id, params, args, &state.interner)?;
+                                let func = state.fns.get(*id).unwrap();
 
-                                iter.jump(body_ptr);
-                            } else {
-                                if let Some(name) = func.name {
-                                    bail!("Function `{}` cannot take {} arguments", state.interner.get(name), args.len());
+                                let next_ins_id = iter.next_ins_id().unwrap();
+                                let old_scopes = replace(&mut self.scopes, Stack::new());
+                                self.call_stack.push((next_ins_id, old_scopes, *id));
+                                self.scopes.push(Vec::new());
+                                self.push_env();
+                                self.push_env_scope();
+
+                                if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
+                                    self.set_func_args(*id, params, args, &state.interner)?;
+
+                                    iter.jump(body_ptr);
                                 } else {
-                                    bail!("Function with ID `{:?}` cannot take {} arguments", id, args.len());
+                                    if let Some(name) = func.name {
+                                        bail!("Function `{}` cannot take {} arguments", state.interner.get(name), args.len());
+                                    } else {
+                                        bail!("Function with ID `{:?}` cannot take {} arguments", id, args.len());
+                                    }
                                 }
-                            }
 
-                            self.metrics.max_call_stack_depth = self.metrics.max_call_stack_depth
-                                .max(self.call_stack.len() as u16);
-                        },
-                        Data::Closure{id, captures}=>{
-                            self.debug_call(*id, state);
+                                self.metrics.max_call_stack_depth = self.metrics.max_call_stack_depth
+                                    .max(self.call_stack.len() as u16);
+                            },
+                            Data::Closure{id, captures}=>{
+                                self.debug_call(*id, state);
 
-                            let func = state.fns.get(*id).unwrap();
+                                let func = state.fns.get(*id).unwrap();
 
-                            let next_ins_id = iter.next_ins_id().unwrap();
-                            let old_scopes = replace(&mut self.scopes, Stack::new());
-                            self.call_stack.push((next_ins_id, old_scopes, *id));
-                            self.scopes.push(Vec::new());
-                            self.push_env();
-                            self.push_env_scope();
+                                let next_ins_id = iter.next_ins_id().unwrap();
+                                let old_scopes = replace(&mut self.scopes, Stack::new());
+                                self.call_stack.push((next_ins_id, old_scopes, *id));
+                                self.scopes.push(Vec::new());
+                                self.push_env();
+                                self.push_env_scope();
 
-                            for (name, data) in captures {
-                                self.define_var(*name, *data, &state.interner)?;
-                            }
+                                for (name, data) in captures {
+                                    self.define_var(*name, *data, &state.interner)?;
+                                }
 
-                            self.push_env_scope();
+                                self.push_env_scope();
 
-                            if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
-                                self.set_func_args(*id, params, args, &state.interner)?;
+                                if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
+                                    self.set_func_args(*id, params, args, &state.interner)?;
 
-                                iter.jump(body_ptr);
-                            } else {
-                                if let Some(name) = func.name {
-                                    bail!("Function `{}` cannot take {} arguments", state.interner.get(name), args.len());
+                                    iter.jump(body_ptr);
                                 } else {
-                                    bail!("Function with ID `{:?}` cannot take {} arguments", id, args.len());
+                                    if let Some(name) = func.name {
+                                        bail!("Function `{}` cannot take {} arguments", state.interner.get(name), args.len());
+                                    } else {
+                                        bail!("Function with ID `{:?}` cannot take {} arguments", id, args.len());
+                                    }
                                 }
-                            }
 
-                            self.metrics.max_call_stack_depth = self.metrics.max_call_stack_depth
-                                .max(self.call_stack.len() as u16);
-                        },
-                        _=>bail!("Arg0 is not callable!"),
-                    };
+                                self.metrics.max_call_stack_depth = self.metrics.max_call_stack_depth
+                                    .max(self.call_stack.len() as u16);
+                            },
+                            _=>bail!("Arg0 is not callable!"),
+                        }
+                    }
                 },
                 I::TailCall=>{
                     let mut args = self.scopes.pop().unwrap();
-                    let arg0 = args.remove(0);
+                    let mut arg0 = args[0];
                     let data = arg0.get_data();
+                    let mut has_func = true;
 
                     match &*data {
-                        Data::NativeFn(name, f, arg_count)=>{
-                            let dr = match arg_count {
-                                ArgCount::Exact(count)=>if args.len() == *count {
-                                    f(args, self)?
-                                } else {
-                                    bail!("Function `{name}` cannot take {} arguments", args.len());
+                        Data::Object(o)=>{
+                            let mut name = None;
+                            match &*args[1].get_data() {
+                                Data::Ident(i)=>name = Some(*i),
+                                _=>{},
+                            }
+                            match self.get_callable(&*data, name)? {
+                                Some(func)=>{
+                                    args.remove(1);
+                                    drop(data);
+                                    arg0 = func;
                                 },
-                                ArgCount::Any=>f(args, self)?,
-                            };
-                            self.push_dr_to_scope(dr);
+                                _=>{    // field access
+                                    has_func = false;
+                                    let Some(name) = name else {bail!("Cannot call this object")};
+                                    if let Some(data) = o.get(&name) {
+                                        self.push_dr_to_scope(*data);
+                                    } else {
+                                        bail!("Method/Field `{}` does not exist on object", state.interner.get(name));
+                                    }
+                                },
+                            }
                         },
-                        Data::Fn(id)=>{
-                            self.debug_tail_call(*id, state);
+                        _=>{
+                            args.remove(0);
+                        },
+                    }
 
-                            let func = state.fns.get(*id).unwrap();
+                    if has_func {
+                        let data = arg0.get_data();
 
-                            self.scopes = Stack::new();
-                            self.scopes.push(Vec::new());
-                            self.clear_env();
-                            self.push_env_scope();
+                        match &*data {
+                            Data::NativeFn(name, f, arg_count)=>{
+                                let dr = match arg_count {
+                                    ArgCount::Exact(count)=>if args.len() == *count {
+                                        f(args, self, &mut state.interner)?
+                                    } else {
+                                        bail!("Function `{name}` cannot take {} arguments", args.len());
+                                    },
+                                    ArgCount::Any=>f(args, self, &mut state.interner)?,
+                                };
+                                self.push_dr_to_scope(dr);
+                            },
+                            Data::Fn(id)=>{
+                                self.debug_tail_call(*id, state);
 
-                            if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
-                                // println!("Calling function with params: {params:?}");
-                                self.set_func_args(*id, params, args, &state.interner)?;
+                                let func = state.fns.get(*id).unwrap();
 
-                                iter.jump(body_ptr);
-                                // dbg!(iter.peek());
-                            } else {
-                                if let Some(name) = func.name {
-                                    bail!("Function `{}` cannot take {} arguments", state.interner.get(name), args.len());
+                                self.scopes = Stack::new();
+                                self.scopes.push(Vec::new());
+                                self.clear_env();
+                                self.push_env_scope();
+
+                                if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
+                                    // println!("Calling function with params: {params:?}");
+                                    self.set_func_args(*id, params, args, &state.interner)?;
+
+                                    iter.jump(body_ptr);
+                                    // dbg!(iter.peek());
                                 } else {
-                                    bail!("Function with ID `{:?}` cannot take {} arguments", id, args.len());
+                                    if let Some(name) = func.name {
+                                        bail!("Function `{}` cannot take {} arguments", state.interner.get(name), args.len());
+                                    } else {
+                                        bail!("Function with ID `{:?}` cannot take {} arguments", id, args.len());
+                                    }
                                 }
-                            }
-                        },
-                        Data::Closure{id, captures}=>{
-                            self.debug_tail_call(*id, state);
+                            },
+                            Data::Closure{id, captures}=>{
+                                self.debug_tail_call(*id, state);
 
-                            let func = state.fns.get(*id).unwrap();
+                                let func = state.fns.get(*id).unwrap();
 
-                            self.scopes = Stack::new();
-                            self.scopes.push(Vec::new());
-                            self.clear_env();
-                            self.push_env_scope();
+                                self.scopes = Stack::new();
+                                self.scopes.push(Vec::new());
+                                self.clear_env();
+                                self.push_env_scope();
 
-                            for (name, data) in captures {
-                                self.define_var(*name, *data, &state.interner)?;
-                            }
+                                for (name, data) in captures {
+                                    self.define_var(*name, *data, &state.interner)?;
+                                }
 
-                            self.push_env_scope();
+                                self.push_env_scope();
 
-                            if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
-                                self.set_func_args(*id, params, args, &state.interner)?;
+                                if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
+                                    self.set_func_args(*id, params, args, &state.interner)?;
 
-                                iter.jump(body_ptr);
-                            } else {
-                                if let Some(name) = func.name {
-                                    bail!("Function `{}` cannot take {} arguments", state.interner.get(name), args.len());
+                                    iter.jump(body_ptr);
                                 } else {
-                                    bail!("Function with ID `{:?}` cannot take {} arguments", id, args.len());
+                                    if let Some(name) = func.name {
+                                        bail!("Function `{}` cannot take {} arguments", state.interner.get(name), args.len());
+                                    } else {
+                                        bail!("Function with ID `{:?}` cannot take {} arguments", id, args.len());
+                                    }
                                 }
-                            }
-                        },
-                        _=>bail!("Arg0 is not callable!"),
-                    };
+                            },
+                            _=>bail!("Arg0 is not callable!"),
+                        }
+                    }
                 },
                 I::Return=>{
                     // dbg!(&self.scopes);
@@ -739,6 +836,26 @@ impl Interpreter {
         }
 
         return Ok(());
+    }
+
+    fn get_callable(&self, object: &Data, name: Option<Ident>)->Result<Option<DataRef>> {
+        match object {
+            Data::Object(fields)=>{
+                let Some(vtable) = fields.get(&self.vtable_ident) else {return Ok(None)};
+                let vtable_ref = vtable.get_data();
+                match &*vtable_ref {
+                    Data::Object(entries)=>{
+                        if let Some(name) = name {
+                            return Ok(entries.get(&name).copied());
+                        } else {
+                            return Ok(entries.get(&self.vtable_ident).copied());
+                        }
+                    },
+                    _=>bail!("Vtable is not an object!"),
+                }
+            },
+            _=>bail!("Not an object"),
+        }
     }
 
     fn debug_call(&self, id: FnId, state: &ConvertState) {

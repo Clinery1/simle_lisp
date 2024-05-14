@@ -16,6 +16,7 @@ use std::{
 };
 use super::{
     Interpreter,
+    Interner,
     Data,
     DataRef,
     NativeData,
@@ -23,7 +24,7 @@ use super::{
 };
 
 
-pub fn open(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn open(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     let data_ref = args[0].get_data();
     match &*data_ref {
         Data::String(s)=>{
@@ -49,7 +50,7 @@ pub fn open(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     }
 }
 
-pub fn read_line(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn read_line(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     let data_ref = args[0].get_data();
     match &*data_ref {
         Data::NativeData(d)=>match d {
@@ -79,7 +80,7 @@ pub fn read_line(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     }
 }
 
-pub fn read(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn read(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     let data = args[0];
     let data_ref = data.get_data();
     match &*data_ref {
@@ -108,7 +109,7 @@ pub fn read(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     }
 }
 
-pub fn write(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn write(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     let file_ref = args[0].get_data();
     let data_ref = args[1].get_data();
     let data = match &*data_ref {

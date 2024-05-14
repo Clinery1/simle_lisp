@@ -124,6 +124,13 @@ impl<'a> MyParser<'a> {
         }
     }
 
+    fn dot_ident(&mut self)->ParseResult<&'a str> {
+        match self.next() {
+            Token::DotIdent(i)=>Ok(i),
+            _=>Err(self.error("Unexpected token. Expected dot identifier")),
+        }
+    }
+
     pub fn parse_all(&mut self)->Result<Vec<Expr<'a>>> {
         let mut ret = Vec::new();
 
@@ -190,6 +197,7 @@ impl<'a> MyParser<'a> {
                 "quote"=>return self.parse_quote(),
                 "begin"=>return self.parse_begin(),
                 "object"=>return self.parse_object(),
+                "module"=>return self.parse_module(),
                 _=>{},
             },
             _=>{},
@@ -209,8 +217,36 @@ impl<'a> MyParser<'a> {
         return Ok(Expr::List(items));
     }
 
+    fn parse_module(&mut self)->Result<Expr<'a>> {
+        self.match_ident("module")?;
+        let name = self.ident()?;
+        self.end_list()?;
+        return Ok(Expr::Module(name));
+    }
+
     fn parse_object(&mut self)->Result<Expr<'a>> {
-        todo!();
+        self.match_ident("object")?;
+
+        return self.parse_end_listed_items(Self::parse_object_inner)
+            .map(Expr::Object)
+            .context("Object fields");
+    }
+
+    fn parse_object_inner(&mut self)->Result<Field<'a>> {
+        match self.peek() {
+            Token::List(Start)=>{
+                self.start_list()?;
+
+                let name = self.dot_ident()?;
+                let e = self.parse_expr()?;
+                
+                self.end_list()?;
+
+                return Ok(Field::Full(name, e));
+            },
+            Token::DotIdent(_)=>Ok(Field::Shorthand(self.dot_ident()?)),
+            _=>bail!("Unexpected token. Expected `(` or DotIdent"),
+        }
     }
 
     fn parse_begin(&mut self)->Result<Expr<'a>> {

@@ -4,6 +4,7 @@ use anyhow::{
 };
 use super::{
     Interpreter,
+    Interner,
     Data,
     DataRef,
 };
@@ -11,7 +12,7 @@ use super::{
 
 macro_rules! define_arithmetic_func {
     ($name: ident, $sym: tt)=>{
-        pub fn $name(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+        pub fn $name(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
             if args.is_empty() {return Ok(i.alloc(Data::Number(0)))}
 
             let mut iter = args.into_iter();
@@ -49,7 +50,7 @@ macro_rules! define_arithmetic_func {
 
 macro_rules! define_arithmetic_assign_func {
     ($name: ident, $sym: tt)=>{
-        pub fn $name(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+        pub fn $name(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
             if args.is_empty() {return Ok(i.alloc(Data::Number(0)))}
 
             let mut iter = args.into_iter();
@@ -128,12 +129,19 @@ fn do_the_thing_add(d1: &mut Data, d2: &Data)->Result<()> {
 
             *f1 += f2;
         },
+        Data::Object(fields1)=>{
+            let Data::Object(fields2) = d2 else {
+                bail!("Type error: Expected object");
+            };
+
+            fields1.extend(fields2.iter());
+        },
         _=>bail!("Type error: AddAssign can only accept number, float, string"),
     }
     return Ok(());
 }
 
-pub fn add(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn add(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     if args.is_empty() {return Ok(i.alloc(Data::Number(0)))}
 
     let mut iter = args.into_iter();
@@ -159,7 +167,7 @@ pub fn add(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     return Ok(first);
 }
 
-pub fn add_assign(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn add_assign(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     if args.is_empty() {return Ok(i.alloc(Data::Number(0)))}
 
     let mut iter = args.into_iter();
@@ -185,7 +193,7 @@ pub fn add_assign(args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     return Ok(first);
 }
 
-pub fn equal(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn equal(mut args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     if args.len() == 0 {
         return Ok(i.alloc(Data::Bool(true)));
     }
@@ -201,7 +209,7 @@ pub fn equal(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     return Ok(i.alloc(Data::Bool(true)));
 }
 
-pub fn not_equal(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn not_equal(mut args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     if args.len() == 0 {
         return Ok(i.alloc(Data::Bool(true)));
     }
@@ -217,7 +225,7 @@ pub fn not_equal(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     return Ok(i.alloc(Data::Bool(true)));
 }
 
-pub fn less_equal(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn less_equal(mut args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     if args.len() == 0 {
         return Ok(i.alloc(Data::Bool(true)));
     }
@@ -235,7 +243,7 @@ pub fn less_equal(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> 
     return Ok(i.alloc(Data::Bool(true)));
 }
 
-pub fn greater_equal(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn greater_equal(mut args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     if args.len() == 0 {
         return Ok(i.alloc(Data::Bool(true)));
     }
@@ -253,7 +261,7 @@ pub fn greater_equal(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRe
     return Ok(i.alloc(Data::Bool(true)));
 }
 
-pub fn less(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn less(mut args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     if args.len() == 0 {
         return Ok(i.alloc(Data::Bool(true)));
     }
@@ -271,7 +279,7 @@ pub fn less(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
     return Ok(i.alloc(Data::Bool(true)));
 }
 
-pub fn greater(mut args: Vec<DataRef>, i: &mut Interpreter)->Result<DataRef> {
+pub fn greater(mut args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     if args.len() == 0 {
         return Ok(i.alloc(Data::Bool(true)));
     }

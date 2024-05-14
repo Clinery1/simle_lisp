@@ -1,5 +1,6 @@
 use super::{
     Interpreter,
+    Interner,
     NativeFn,
     NativeData,
     Data,
@@ -48,6 +49,7 @@ pub const BUILTINS: &[(&str, NativeFn, ArgCount)] = &[
     builtin!(list_pop, listPop, 1),
     builtin!(clone, 1),
     builtin!(debug, Any),
+    builtin!(intern, 1),
 
     // misc
     builtin!(split_list, splitList, 2),

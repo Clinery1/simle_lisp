@@ -1,5 +1,7 @@
 #[derive(Debug, PartialEq)]
 pub enum Expr<'a> {
+    Module(&'a str),
+
     Def {
         name: &'a str,
         data: Box<Self>,
