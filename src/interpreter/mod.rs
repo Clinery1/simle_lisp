@@ -33,7 +33,7 @@ pub mod data;
 
 
 pub type CallStack = Stack<(InstructionId, Scopes, FnId)>;
-pub type Scopes = Stack<Vec<DataRef>>;
+pub type Scopes = Stack<ScopeItem>;
 
 pub type NativeFn = fn(Vec<DataRef>, &mut Interpreter, &mut Interner)->Result<DataRef>;
 
@@ -47,7 +47,6 @@ pub type IdentSet = HashSet<Ident, FnvBuildHasher>;
 // pub type InsIdSet = HashSet<InstructionId, FnvBuildHasher<Ident>>;
 
 
-// const MAX_ITERS: usize = 500;
 const DEBUG: bool = false;
 
 
@@ -57,12 +56,63 @@ pub enum ArgCount {
     Any,
 }
 
+pub enum ScopeItem {
+    List(Vec<DataRef>),
+    Return(Option<DataRef>),
+}
+impl ScopeItem {
+    pub fn last(&mut self)->Option<DataRef> {
+        match self {
+            Self::Return(item)=>item.take(),
+            Self::List(items)=>items.pop(),
+        }
+    }
 
-/// This is where we ensure the contract of `external` `DataRef`s is upheld. Any data entering this
-/// struct is REQUIRED to be set EXTERNAL and any data leaving is REQUIRED to be set NOT EXTERNAL.
-/// We should make sure to uphold that contract properly.
+    pub fn list(self)->Vec<DataRef> {
+        match self {
+            Self::List(items)=>items,
+            _=>panic!("Cannot get items from ScopeItem::Return"),
+        }
+    }
+
+    pub fn iter(&self)->ScopeItemIter {
+        ScopeItemIter {
+            item: self,
+            idx: 0,
+        }
+    }
+}
+
+
+pub struct ScopeItemIter<'a> {
+    item: &'a ScopeItem,
+    idx: usize,
+}
+impl<'a> Iterator for ScopeItemIter<'a> {
+    type Item = &'a DataRef;
+    fn next(&mut self)->Option<Self::Item> {
+        match self.item {
+            ScopeItem::List(items)=>{
+                let ret = items.get(self.idx)?;
+                self.idx += 1;
+
+                return Some(ret);
+            },
+            ScopeItem::Return(i)=>if self.idx == 0 {
+                self.idx += 1;
+                return i.as_ref();
+            } else {
+                return None;
+            },
+        }
+    }
+}
+
+
+/// We now have `ExternalData` to track `external` data for us. We can't forget to set/unset
+/// external because it is encoded into the type.
 pub struct Env {
-    vars: IdentMap<Stack<DataRef>>,
+    vars: IdentMap<Stack<ExternalData>>,
     scopes: Stack<IdentSet>,
 }
 impl Default for Env {
@@ -79,16 +129,13 @@ impl Env {
         }
     }
 
-    // Data leaves
     pub fn clear(&mut self)->usize {
         let mut count = 0;
         self.scopes.clear();
         // retain the storage, but not the data. Try to avoid unnecessary allocations
         for (_, scope) in self.vars.iter_mut() {
-            for dr in scope.drain(..) {
-                count += 1;
-                dr.unset_external();
-            }
+            count += scope.len();
+            scope.drain(..).for_each(drop);
         }
 
         return count;
@@ -102,13 +149,11 @@ impl Env {
         return total;
     }
 
-    // Data neither leaves nor enters
     #[inline]
     pub fn push_scope(&mut self) {
         self.scopes.push(IdentSet::default());
     }
 
-    // Data leaves
     #[inline]
     pub fn pop_scope(&mut self)->usize {
         if let Some(scope) = self.scopes.pop() {
@@ -116,9 +161,7 @@ impl Env {
             for var in scope {
                 let entry = self.vars.get_mut(&var).unwrap();
 
-                // Data leaving is set NOT external
-                let dr = entry.pop().unwrap();
-                dr.unset_external();
+                drop(entry.pop().unwrap());
 
                 if entry.len() == 0 {
                     self.vars.remove(&var);
@@ -131,60 +174,45 @@ impl Env {
         return 0;
     }
 
-    // Data both enters and leaves
     #[inline]
     pub fn insert(&mut self, name: Ident, data: DataRef)->Option<DataRef> {
-        // data entering is SET external
-        data.set_external();
-
         // if current scope contains name, then remove the old value and insert a new one
         if self.scopes[0].contains(&name) {
             let stack = self.vars.get_mut(&name).unwrap();
 
-            // Data leaving is set NOT external
             let ret = stack.pop();
-            ret.inspect(DataRef::unset_external);
 
-            stack.push(data);
+            stack.push(data.external());
 
-            return ret;
+            return ret.map(ExternalData::inner);
         }
 
         // if scope does NOT contain name, then insert it
-        self.vars.entry(name).or_insert_with(Stack::new).push(data);
+        self.vars.entry(name).or_insert_with(Stack::new).push(data.external());
         self.scopes[0].insert(name);
 
         return None;
     }
 
-    // Data both enters and leaves
     pub fn set(&mut self, name: Ident, data: DataRef)->Result<DataRef, DataRef> {
         if let Some(stack) = self.vars.get_mut(&name) {
-            // SET external for entering data
-            data.set_external();
+            let old = replace(&mut stack[0], data.external());
 
-            // set NOT external for leaving data
-            let old = stack[0];
-            old.unset_external();
-
-            stack[0] = data;
-            return Ok(old);
+            return Ok(old.inner());
         }
 
         return Err(data);
     }
 
-    // Data is neither leaving nor entering. It is merely copied.
     pub fn get(&self, name: Ident)->Option<DataRef> {
-        Some(self.vars.get(&name)?[0])
+        Some((*self.vars.get(&name)?[0]).clone())
     }
 }
 impl Drop for Env {
-    // Data is leaving FOREVER!
     fn drop(&mut self) {
         for (_, mut scope) in self.vars.drain() {
             while let Some(dr) = scope.pop() {
-                dr.unset_external();
+                drop(dr);   // destructor sets external
             }
         }
         assert!(self.vars.len() == 0);
@@ -321,16 +349,14 @@ impl Interpreter {
 
         if self.env_stack.len() > 0 {
             match self.env_stack[0].insert(var, data) {
-                Some(dr)=>{
-                    dr.unset_external();
+                Some(_)=>{
                     bail!("Var `{}` is already defined", interner.get(var));
                 },
                 _=>{},
             }
         } else {
             match self.root_env.insert(var, data) {
-                Some(dr)=>{
-                    dr.unset_external();
+                Some(_)=>{
                     bail!("Var `{}` is already defined", interner.get(var));
                 },
                 _=>{},
@@ -345,9 +371,8 @@ impl Interpreter {
 
         if self.env_stack.len() > 0 {
             match self.env_stack[0].set(var, data) {
-                Ok(dr)=>dr.unset_external(),
-                Err(dr)=>{
-                    dr.unset_external();
+                Ok(_)=>{},
+                Err(_)=>{
                     bail!("Attempt to set an undefined variable: `{}`", interner.get(var));
                 },
             }
@@ -387,7 +412,7 @@ impl Interpreter {
     }
 
     #[inline]
-    pub fn clone_data(&mut self, dr: DataRef)->DataRef {
+    pub fn clone_data(&mut self, dr: &DataRef)->DataRef {
         self.alloc(dr.get_data().clone())
     }
 
@@ -399,13 +424,18 @@ impl Interpreter {
 
     #[inline]
     pub fn push_dr_to_scope(&mut self, dr: DataRef) {
-        self.scopes[0].push(dr);
+        match &mut self.scopes[0] {
+            ScopeItem::List(items)=>items.push(dr),
+            ScopeItem::Return(data)=>*data = Some(dr),
+        }
     }
 
     #[inline]
     pub fn pop_from_scope(&mut self)->Option<DataRef> {
-        let dr = self.scopes[0].pop()?;
-        return Some(dr);
+        match &mut self.scopes[0] {
+            ScopeItem::List(items)=>items.pop(),
+            ScopeItem::Return(data)=>data.take(),
+        }
     }
 
     // TODO: Make `DataStore` aware of the data in `scopes` and `call_stack` before we do a GC and
@@ -417,7 +447,7 @@ impl Interpreter {
 
         let mut iter = state.instructions.iter();
 
-        self.scopes.push(Vec::new());
+        self.scopes.push(ScopeItem::Return(None));
 
         let mut ins_count = 0;
 
@@ -430,7 +460,7 @@ impl Interpreter {
             //     println!("Instruction #{ins_count}; self.call_stack.len() = {}", self.call_stack.len());
             // }
             if ins_count > MAX_ITERS {
-                // panic!();
+                panic!();
             }
             self.metrics.instructions_executed += 1;
             ins_count += 1;
@@ -447,12 +477,12 @@ impl Interpreter {
                 },
 
                 I::Define(i)=>{
-                    let data = *self.scopes[0].last().unwrap();
+                    let data = self.scopes[0].last().unwrap();
 
                     self.define_var(*i, data, &state.interner)?;
                 },
                 I::Set(i)=>{
-                    let data = *self.scopes[0].last().unwrap();
+                    let data = self.scopes[0].last().unwrap();
 
                     self.set_var(*i, data, &state.interner)?;
                 },
@@ -500,7 +530,7 @@ impl Interpreter {
                         Some(d)=>match &*d.get_data() {
                             Data::List(items)=>{
                                 items.iter()
-                                    .copied()
+                                    .cloned()
                                     .for_each(|dr|self.push_dr_to_scope(dr));
                             },
                             _=>bail!("Splat only accepts lists"),
@@ -510,8 +540,8 @@ impl Interpreter {
                 },
 
                 I::Call=>{
-                    let mut args = self.scopes.pop().unwrap();
-                    let mut arg0 = args[0];
+                    let mut args = self.scopes.pop().unwrap().list();
+                    let mut arg0 = args[0].clone();
                     let data = arg0.get_data();
                     let mut has_func = true;
 
@@ -536,7 +566,7 @@ impl Interpreter {
                                         0|1=>unreachable!(),
                                         // Just (Object .field)
                                         2=>if let Some(field_data) = o.get(&name) {
-                                            self.push_dr_to_scope(*field_data);
+                                            self.push_dr_to_scope(field_data.clone());
                                         } else {
                                             bail!("Method/Field `{}` does not exist on object", state.interner.get(name));
                                         },
@@ -544,11 +574,11 @@ impl Interpreter {
                                         3=>{
                                             drop(data);
 
-                                            let data = args[2];
+                                            let data = args[2].clone();
                                             let mut dr_ref = args[0].get_data_mut();
                                             let Data::Object(fields) = &mut *dr_ref else {unreachable!()};
 
-                                            fields.insert(name, data);
+                                            fields.insert(name, data.clone());
 
                                             // push the data just assigned to the field back to the scope
                                             self.push_dr_to_scope(data);
@@ -586,7 +616,7 @@ impl Interpreter {
                                 let next_ins_id = iter.next_ins_id().unwrap();
                                 let old_scopes = replace(&mut self.scopes, Stack::new());
                                 self.call_stack.push((next_ins_id, old_scopes, *id));
-                                self.scopes.push(Vec::new());
+                                self.scopes.push(ScopeItem::Return(None));
                                 self.push_env();
                                 self.push_env_scope();
 
@@ -613,12 +643,12 @@ impl Interpreter {
                                 let next_ins_id = iter.next_ins_id().unwrap();
                                 let old_scopes = replace(&mut self.scopes, Stack::new());
                                 self.call_stack.push((next_ins_id, old_scopes, *id));
-                                self.scopes.push(Vec::new());
+                                self.scopes.push(ScopeItem::Return(None));
                                 self.push_env();
                                 self.push_env_scope();
 
                                 for (name, data) in captures {
-                                    self.define_var(*name, *data, &state.interner)?;
+                                    self.define_var(*name, data.clone(), &state.interner)?;
                                 }
 
                                 self.push_env_scope();
@@ -643,8 +673,8 @@ impl Interpreter {
                     }
                 },
                 I::TailCall=>{
-                    let mut args = self.scopes.pop().unwrap();
-                    let mut arg0 = args[0];
+                    let mut args = self.scopes.pop().unwrap().list();
+                    let mut arg0 = args[0].clone();
                     let data = arg0.get_data();
                     let mut has_func = true;
 
@@ -665,7 +695,7 @@ impl Interpreter {
                                     has_func = false;
                                     let Some(name) = name else {bail!("Cannot call this object")};
                                     if let Some(data) = o.get(&name) {
-                                        self.push_dr_to_scope(*data);
+                                        self.push_dr_to_scope(data.clone());
                                     } else {
                                         bail!("Method/Field `{}` does not exist on object", state.interner.get(name));
                                     }
@@ -698,7 +728,7 @@ impl Interpreter {
                                 let func = state.fns.get(*id).unwrap();
 
                                 self.scopes = Stack::new();
-                                self.scopes.push(Vec::new());
+                                self.scopes.push(ScopeItem::Return(None));
                                 self.clear_env();
                                 self.push_env_scope();
 
@@ -722,12 +752,12 @@ impl Interpreter {
                                 let func = state.fns.get(*id).unwrap();
 
                                 self.scopes = Stack::new();
-                                self.scopes.push(Vec::new());
+                                self.scopes.push(ScopeItem::Return(None));
                                 self.clear_env();
                                 self.push_env_scope();
 
                                 for (name, data) in captures {
-                                    self.define_var(*name, *data, &state.interner)?;
+                                    self.define_var(*name, data.clone(), &state.interner)?;
                                 }
 
                                 self.push_env_scope();
@@ -765,8 +795,16 @@ impl Interpreter {
                     self.push_dr_to_scope(last);
                 },
 
+                I::StartReturnScope=>{
+                    self.scopes.push(ScopeItem::Return(None));
+                    if self.env_stack.len() == 0 {
+                        self.root_env.push_scope();
+                    } else {
+                        self.push_env_scope();
+                    }
+                },
                 I::StartScope=>{
-                    self.scopes.push(Vec::new());
+                    self.scopes.push(ScopeItem::List(Vec::new()));
                     if self.env_stack.len() == 0 {
                         self.root_env.push_scope();
                     } else {
@@ -774,9 +812,14 @@ impl Interpreter {
                     }
                 },
                 I::EndScope=>{
-                    let mut prev_scope = self.scopes.pop().unwrap();
-                    if let Some(data) = prev_scope.pop() {
-                        self.push_dr_to_scope(data);
+                    let prev_scope = self.scopes.pop().unwrap();
+                    match prev_scope {
+                        ScopeItem::Return(data)=>if let Some(data) = data {
+                            self.push_dr_to_scope(data);
+                        },
+                        ScopeItem::List(mut items)=>if let Some(data) = items.pop() {
+                            self.push_dr_to_scope(data);
+                        },
                     }
 
                     if self.env_stack.len() == 0 {
@@ -846,9 +889,9 @@ impl Interpreter {
                 match &*vtable_ref {
                     Data::Object(entries)=>{
                         if let Some(name) = name {
-                            return Ok(entries.get(&name).copied());
+                            return Ok(entries.get(&name).cloned());
                         } else {
-                            return Ok(entries.get(&self.vtable_ident).copied());
+                            return Ok(entries.get(&self.vtable_ident).cloned());
                         }
                     },
                     _=>bail!("Vtable is not an object!"),

@@ -56,7 +56,7 @@ pub fn chars(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<
     if args.len() != 1 {
         bail!("`chars` can only take one argument");
     }
-    let data = args[0];
+    let data = &args[0];
     let data_ref = data.get_data();
     match &*data_ref {
         Data::String(s)=>{
@@ -74,9 +74,9 @@ pub fn split(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<
     if args.len() != 2 {
         bail!("`split` can only take two arguments");
     }
-    let data = args[0];
+    let data = &args[0];
     let data_ref = data.get_data();
-    let split_thing = args[1];
+    let split_thing = &args[1];
     let split_thing_ref = split_thing.get_data();
     match &*data_ref {
         Data::String(s)=>{

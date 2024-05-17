@@ -1,9 +1,3 @@
-//! TODO:
-//! - add an early return expression e.g., `(return EXPR)`
-//! - `apply` builtin function
-//! - arithmetic functions
-
-
 use parser_helper::SimpleError;
 use std::{
     fs::read_to_string,
@@ -66,18 +60,24 @@ fn main() {
                     println!("Runtime: {:?}", interpreter.metrics.total_run_time);
                     let rt = interpreter.metrics.total_run_time.as_secs_f32();
                     let ins_per_sec = interpreter.metrics.instructions_executed as f32 / rt;
-                    if ins_per_sec > 1_000_000.0 {
-                        println!("{:.4}M ins/s", ins_per_sec / 1_000_000.0);
-                    } else if ins_per_sec > 1_000.0 {
-                        println!("{:.4}K ins/s", ins_per_sec / 1_000.0);
-                    } else {
-                        println!("{:.2} ins/s", ins_per_sec);
-                    }
+                    println!("{} ins/s", human_readable_fmt(ins_per_sec));
                 },
                 Err(e)=>error_trace(e, &source, "example"),
             }
         },
         Err(e)=>error_trace(e, &source, "example"),
+    }
+}
+
+fn human_readable_fmt(val: f32)->String {
+    if val > 1_000_000_000.0 {
+        format!("{:.2}G", val / 1_000_000_000.0)
+    } else if val > 1_000_000.0 {
+        format!("{:.2}M", val / 1_000_000.0)
+    } else if val > 1_000.0 {
+        format!("{:.2}K", val / 1_000.0)
+    } else {
+        format!("{:.2}", val)
     }
 }
 

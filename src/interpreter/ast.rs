@@ -70,6 +70,7 @@ pub enum Instruction {
     TailCall,
     Return,
 
+    StartReturnScope,
     StartScope,
     EndScope,
 
@@ -483,6 +484,11 @@ impl<'a> ConvertState<'a> {
         self.instructions.push(Instruction::Object(fields));
     }
 
+    #[inline]
+    pub fn start_return_scope(&mut self) {
+        self.instructions.push(Instruction::StartReturnScope);
+    }
+
     pub fn add_func(&mut self, f: RefFn<'a>)->FnId {
         let id = self.fns.reserve_slot();
         self.todo_fns.push((id, f));
@@ -580,6 +586,7 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
             state.set_var(name);
         },
         RefExpr::Object(fields)=>{
+            state.start_scope();
             let mut new_fields = Vec::with_capacity(fields.len());
             for field in fields {
                 match field {
@@ -596,6 +603,7 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
                 }
             }
             state.object(new_fields);
+            state.end_scope();
         },
         RefExpr::Fn(f)=>{
             let fn_id = state.add_func(f);
@@ -662,7 +670,7 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
             state.splat();
         },
         RefExpr::Begin(exprs)=>{
-            state.start_scope();
+            state.start_return_scope();
 
             convert_exprs(state, exprs, is_tail);
             

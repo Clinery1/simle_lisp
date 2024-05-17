@@ -81,7 +81,7 @@ pub fn read_line(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Res
 }
 
 pub fn read(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
-    let data = args[0];
+    let data = &args[0];
     let data_ref = data.get_data();
     match &*data_ref {
         Data::NativeData(d)=>match d {

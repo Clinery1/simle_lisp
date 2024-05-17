@@ -20,6 +20,7 @@ use std::{
         Hasher,
         Hash,
     },
+    ops::Deref,
     os::fd::AsRawFd,
     rc::Rc,
     fs::File,
@@ -93,15 +94,15 @@ impl Data {
     pub fn add_data_refs(&self, refs: &mut DataRefSet) {
         match self {
             Self::List(items)=>refs.extend(items.iter()
-                .copied()
+                .cloned()
                 .map(HashableDataRef)
             ),
             Self::Object(fields)=>refs.extend(fields.values()
-                .copied()
+                .cloned()
                 .map(HashableDataRef)
             ),
             Self::Closure{captures,..}=>refs.extend(captures.iter()
-                .copied()
+                .cloned()
                 .map(|(_,c)|c)
                 .map(HashableDataRef)
             ),
@@ -137,7 +138,7 @@ impl Data {
 }
 
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct HashableDataRef(pub DataRef);
 /// This is acceptable because we provide a custom version of `PartialEq` that works both ways, AND
 /// on just the pointers themselves.
@@ -153,10 +154,28 @@ impl Hash for HashableDataRef {
     }
 }
 
+#[derive(Debug, PartialEq)]
+#[must_use]
+pub struct ExternalData(DataRef);
+impl ExternalData {
+    pub fn inner(self)->DataRef {
+        self.0.clone()
+    }
+}
+impl Drop for ExternalData {
+    fn drop(&mut self) {
+        self.0.unset_external();
+    }
+}
+impl Deref for ExternalData {
+    type Target = DataRef;
+    fn deref(&self)->&DataRef {&self.0}
+}
+
 /// A shared reference to some `Data`. The data can be mutably borrowed, but it panics if the data
 /// is already borrowed either mutably or shared (does not include other copies of `DataRef`, but
 /// the internal `Data`).
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct DataRef {
     inner: NonNull<DataBox>,
 }
@@ -214,6 +233,12 @@ impl DataRef {
     #[inline]
     pub fn hashable(self)->HashableDataRef {
         HashableDataRef(self)
+    }
+
+    #[inline]
+    pub fn external(self)->ExternalData {
+        self.set_external();
+        ExternalData(self)
     }
 
     #[inline]
@@ -335,13 +360,13 @@ impl From<Data> for DataBox {
 
 /// A safe way to store data
 pub struct DataStore {
-    datas: Vec<DataRef>,
+    datas: DataRefSet,
     generation: u64,
 }
 impl DataStore {
     pub fn new()->Self {
         DataStore {
-            datas: Vec::new(),
+            datas: DataRefSet::default(),
             generation: 0,
         }
     }
@@ -353,15 +378,10 @@ impl DataStore {
         let dr = DataRef::new(db);
 
         // println!("Before push");
-        self.datas.push(dr);
+        self.datas.insert(dr.clone().hashable());
         // println!("After push");
 
         return dr;
-    }
-
-    #[inline]
-    pub fn dedup(&mut self) {
-        self.datas.dedup_by(|a, b|a.inner == b.inner);
     }
 
     pub fn get_alloc_rem(&self)->usize {
@@ -373,7 +393,6 @@ impl DataStore {
 
     // This takes a while, so be sure you want to run it.
     pub fn collect(&mut self, call_stack: &CallStack, scopes: &Scopes)->usize {
-        self.dedup();
         self.generation += 1;
         let generation = self.generation;
 
@@ -388,8 +407,7 @@ impl DataStore {
             .flatten();
         let call_item_iter = call_scopes_iter
             .map(|items|items.iter())
-            .flatten()
-            .copied();
+            .flatten();
         call_item_iter.for_each(|d|{
             d.set_generation(generation);
             let dr_ref = d.get_data();
@@ -402,8 +420,7 @@ impl DataStore {
         let scopes_iter = scopes.iter();
         let item_iter = scopes_iter
             .map(|items|items.iter())
-            .flatten()
-            .copied();
+            .flatten();
         item_iter.for_each(|d|{
             d.set_generation(generation);
             let dr_ref = d.get_data();
@@ -415,19 +432,18 @@ impl DataStore {
         let mut external_count = 0;
         let mut both_count = 0;
         self.datas.iter()
-            .copied()
-            .filter(|d|d.is_pinned() || d.is_external())
+            .filter(|d|d.0.is_pinned() || d.0.is_external())
             .for_each(|d|{
-                if d.is_pinned() && d.is_external() {
+                if d.0.is_pinned() && d.0.is_external() {
                     both_count += 1;
-                } else if d.is_pinned() {
+                } else if d.0.is_pinned() {
                     pinned_count += 1;
-                } else if d.is_external() {
+                } else if d.0.is_external() {
                     external_count += 1;
                 }
 
-                d.set_generation(generation);
-                let dr_ref = d.get_data();
+                d.0.set_generation(generation);
+                let dr_ref = d.0.get_data();
                 dr_ref.add_data_refs(&mut todo_list);
             });
         // eprintln!("{} total allocations, {pinned_count} pinned, {external_count} external, and {both_count} are both", self.datas.len());
@@ -458,22 +474,22 @@ impl DataStore {
         let mut dealloc_size = 0;
 
         for data in datas.into_iter() {
-            if data.get_generation() == generation {
-                self.datas.push(data);
+            if data.0.get_generation() == generation {
+                self.datas.insert(data);
                 continue;
             }
 
-            assert!(!data.is_pinned());
-            assert!(!data.is_external());
+            assert!(!data.0.is_pinned());
+            assert!(!data.0.is_external());
 
-            dealloc_size += data.allocation_size();
+            dealloc_size += data.0.allocation_size();
 
             free_count += 1;
 
             // SAFETY: We have already shaken the tree, set all reachable datas, and otherwise made
             // sure this won't (maybe? pleeeease?) cause any UB or memory errors.
             unsafe {
-                data.dealloc();
+                data.0.dealloc();
             }
         }
 
@@ -488,18 +504,16 @@ impl DataStore {
 }
 impl Drop for DataStore {
     fn drop(&mut self) {
-        self.dedup();
-
         let mut diff = self.get_alloc_rem();
         let mut pinned = 0;
         let mut external = 0;
         let mut both = 0;
         for dr in self.datas.iter() {
-            if dr.is_pinned() && dr.is_external() {
+            if dr.0.is_pinned() && dr.0.is_external() {
                 both += 1;
-            } else if dr.is_external() {
+            } else if dr.0.is_external() {
                 external += 1;
-            } else if dr.is_pinned() {
+            } else if dr.0.is_pinned() {
                 pinned += 1;
                 diff -= 1;
             }
@@ -510,7 +524,7 @@ impl Drop for DataStore {
             println!("{pinned} pinned; {external} external; {both} both external and pinned");
         }
 
-        for dr in self.datas.drain(..) {
+        for dr in self.datas.drain(..).map(|h|h.0) {
             // SAFETY: I dont really know, but it *seems* safe? I have made sure any duplicate
             // DataRefs are removed, and they *hopefully* won't be used after the GC is dropped.
             // Technically, there are a lot of factors that could lead to UB and memory problems...

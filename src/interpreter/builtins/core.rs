@@ -53,7 +53,7 @@ pub fn index(mut args: Vec<DataRef>, _: &mut Interpreter, _: &mut Interner)->Res
                 bail!("Index out of bounds");
             }
 
-            return Ok(items[*i as usize]);
+            return Ok(items[*i as usize].clone());
         },
         (l, r)=>bail!("`index` can only index a list with a number. index: `{l:?}`, to_index: `{r:?}`"),
     }
@@ -64,7 +64,7 @@ pub fn list(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<D
 }
 
 pub fn clone(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
-    Ok(i.clone_data(args[0]))
+    Ok(i.clone_data(&args[0]))
 }
 
 pub fn length(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
@@ -80,7 +80,7 @@ pub fn length(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result
 }
 
 pub fn list_pop(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
-    let mut data = args[0];
+    let mut data = args[0].clone();
     let mut data_ref = data.get_data_mut();
     match &mut *data_ref {
         Data::List(items)=>return Ok(items.pop().unwrap_or_else(||i.alloc(Data::None))),

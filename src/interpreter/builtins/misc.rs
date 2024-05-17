@@ -15,9 +15,9 @@ pub fn split_list(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Re
     if args.len() != 2 {
         bail!("`split` can only take two arguments");
     }
-    let mut data = i.clone_data(args[0]);
+    let mut data = i.clone_data(&args[0]);
     let mut data_ref = data.get_data_mut();
-    let split_thing = args[1];
+    let split_thing = &args[1];
     let split_thing_ref = split_thing.get_data();
     match &mut *data_ref {
         Data::List(items)=>{

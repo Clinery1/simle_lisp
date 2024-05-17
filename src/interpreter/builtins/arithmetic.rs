@@ -37,7 +37,7 @@ macro_rules! define_arithmetic_func {
                 return Ok(());
             }
 
-            let mut first = i.clone_data(iter.next().unwrap());
+            let mut first = i.clone_data(&iter.next().unwrap());
 
             for arg in iter {
                 do_the_thing(&mut first.get_data_mut(), &arg.get_data())?;
@@ -134,7 +134,7 @@ fn do_the_thing_add(d1: &mut Data, d2: &Data)->Result<()> {
                 bail!("Type error: Expected object");
             };
 
-            fields1.extend(fields2.iter());
+            fields1.extend(fields2.iter().map(|(i,dr)|(*i, dr.clone())));
         },
         _=>bail!("Type error: AddAssign can only accept number, float, string"),
     }
@@ -147,7 +147,7 @@ pub fn add(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<Da
     let mut iter = args.into_iter();
 
 
-    let mut first = i.clone_data(iter.next().unwrap());
+    let mut first = i.clone_data(&iter.next().unwrap());
     let mut first_mut = first.get_data_mut();
 
     match &mut *first_mut {
