@@ -1,6 +1,7 @@
 use anyhow::{
+    Result,
     Error,
-    // anyhow,
+    bail,
 };
 use misc_utils::{
     SlotMap,
@@ -338,20 +339,26 @@ impl Key for ModuleId {
     fn id(&self)->usize {self.0}
 }
 
-pub struct ConvertState<'a> {
+pub struct ConvertState {
     pub interner: Interner,
     pub fns: SlotMap<FnId, Rc<Fn>>,
     pub warnings: Vec<Error>,
     pub instructions: InstructionStore,
     pub modules: SlotMap<ModuleId, Module>,
-    pub todo_fns: Vec<(FnId, RefFn<'a>)>,
-    pub todo_modules: Vec<(ModuleId, Vec<&'a str>)>,
-    pub module_path: Vec<&'a str>,
 }
 #[allow(dead_code)]
-impl<'a> ConvertState<'a> {
+impl ConvertState {
+    pub fn new()->Self {
+        ConvertState {
+            interner: Interner::new(),
+            fns: SlotMap::new(),
+            warnings: Vec::new(),
+            instructions: InstructionStore::new(),
+            modules: SlotMap::new(),
+        }
+    }
     #[inline]
-    pub fn intern(&mut self, s: &'a str)->Ident {
+    pub fn intern(&mut self, s: &str)->Ident {
         self.interner.intern(s)
     }
 
@@ -375,25 +382,25 @@ impl<'a> ConvertState<'a> {
         self.instructions.push(Instruction::Return);
     }
 
-    pub fn define(&mut self, i: &'a str) {
+    pub fn define(&mut self, i: &str) {
         let ident = self.intern(i);
 
         self.instructions.push(Instruction::Define(ident));
     }
 
-    pub fn set_var(&mut self, i: &'a str) {
+    pub fn set_var(&mut self, i: &str) {
         let ident = self.intern(i);
 
         self.instructions.push(Instruction::Set(ident));
     }
 
-    pub fn ident(&mut self, i: &'a str) {
+    pub fn ident(&mut self, i: &str) {
         let ident = self.intern(i);
 
         self.instructions.push(Instruction::Var(ident));
     }
 
-    pub fn dot_ident(&mut self, i: &'a str) {
+    pub fn dot_ident(&mut self, i: &str) {
         let ident = self.intern(i);
 
         self.instructions.push(Instruction::DotIdent(ident));
@@ -489,21 +496,16 @@ impl<'a> ConvertState<'a> {
         self.instructions.push(Instruction::StartReturnScope);
     }
 
-    pub fn add_func(&mut self, f: RefFn<'a>)->FnId {
-        let id = self.fns.reserve_slot();
-        self.todo_fns.push((id, f));
-
-        return id;
+    pub fn reserve_func(&mut self)->FnId {
+        self.fns.reserve_slot()
     }
 
-    pub fn add_module(&mut self, name: &'a str) {
-        let mut path = self.module_path.clone();
-        path.push(name);
-        assert!(path.len() > 0);
+    pub fn reserve_module(&mut self)->ModuleId {
         let m = self.modules.reserve_slot();
-        self.todo_modules.push((m, path));
 
         self.instructions.push(Instruction::Module(m));
+
+        return m;
     }
 
     #[inline]
@@ -518,32 +520,37 @@ impl<'a> ConvertState<'a> {
 }
 
 
-/// Returns (exprs, interner, functions, warnings)
-pub fn convert<'a>(old: Vec<RefExpr<'a>>)->ConvertState<'a> {
-    let mut state = ConvertState {
-        interner: Interner::new(),
-        fns: SlotMap::new(),
-        warnings: Vec::new(),
-        instructions: InstructionStore::new(),
-        modules: SlotMap::new(),
-        todo_fns: Vec::new(),
-        todo_modules: Vec::new(),
-        module_path: Vec::new(),
-    };
+pub fn convert<'a>(old: Vec<RefExpr<'a>>)->Result<ConvertState> {
+    let mut state = ConvertState::new();
+    let mut todo_fns = Vec::new();
 
-    convert_exprs(&mut state, old, false);
+    convert_exprs(&mut state, &mut todo_fns, old, false)?;
 
     state.push_exit();
     
-    while let Some((id, f)) = state.todo_fns.pop() {
-        convert_fn(&mut state, f, id);
+    while let Some((id, f)) = todo_fns.pop() {
+        convert_fn(&mut state, &mut todo_fns, f, id)?;
     }
 
     // while let  Some((id, path)) = state.todo_modules.pop() {
     //     convert_module(&mut state, path, id);
     // }
 
-    return state;
+    return Ok(state);
+}
+
+pub fn repl_convert<'a>(state: &mut ConvertState, exprs: Vec<RefExpr<'a>>)->Result<InstructionId> {
+    let start_id = state.next_ins_id();
+    let mut todo_fns = Vec::new();
+    convert_exprs(state, &mut todo_fns, exprs, false)?;
+
+    state.push_exit();
+    
+    while let Some((id, f)) = todo_fns.pop() {
+        convert_fn(state, &mut todo_fns, f, id)?;
+    }
+
+    return Ok(start_id);
 }
 
 // fn convert_module<'a>(state: &mut ConvertState<'a>, path: Vec<&'a str>, id: ModuleId) {
@@ -552,16 +559,18 @@ pub fn convert<'a>(old: Vec<RefExpr<'a>>)->ConvertState<'a> {
 //     );
 // }
 
-fn convert_exprs<'a>(state: &mut ConvertState<'a>, exprs: Vec<RefExpr<'a>>, is_tail: bool) {
+fn convert_exprs<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, RefFn<'a>)>, exprs: Vec<RefExpr<'a>>, is_tail: bool)->Result<()> {
     let last = exprs.len() - 1;
     for (i, expr) in exprs.into_iter().enumerate() {
         let expr_is_tail = (i == last) && is_tail;
-        convert_single_expr(state, expr, expr_is_tail);
+        convert_single_expr(state, todo_fns, expr, expr_is_tail)?;
     }
+
+    return Ok(());
 }
 
-fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_tail: bool) {
-    match expr {
+fn convert_single_expr<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, RefFn<'a>)>, expr: RefExpr<'a>, is_tail: bool)->Result<()> {
+    Ok(match expr {
         RefExpr::True=>state.bool_true(),
         RefExpr::False=>state.bool_false(),
         RefExpr::Number(n)=>state.number(n),
@@ -571,17 +580,17 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
         RefExpr::Ident(i)=>state.ident(i),
         RefExpr::DotIdent(i)=>state.dot_ident(i),
         RefExpr::Comment(_)=>{},
-        RefExpr::Module(i)=>{
-            state.add_module(i);
+        RefExpr::Module(_)=>{
+            state.reserve_module();
             todo!("Modules");
         },
         RefExpr::Def{name, data}=>{
-            convert_single_expr(state, *data, is_tail);
+            convert_single_expr(state, todo_fns, *data, is_tail)?;
 
             state.define(name);
         },
         RefExpr::Set{name, data}=>{
-            convert_single_expr(state, *data, is_tail);
+            convert_single_expr(state, todo_fns, *data, is_tail)?;
 
             state.set_var(name);
         },
@@ -597,18 +606,21 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
                     RefField::Full(i, expr)=>{
                         new_fields.push(state.intern(i));
                         state.start_scope();
-                        convert_single_expr(state, expr, NOT_TAIL);
+                        convert_single_expr(state, todo_fns, expr, NOT_TAIL)?;
                         state.end_scope();
                     },
                 }
             }
+
+
             state.object(new_fields);
             state.end_scope();
         },
         RefExpr::Fn(f)=>{
-            let fn_id = state.add_func(f);
+            let id = state.reserve_func();
+            todo_fns.push((id, f));
 
-            state.function(fn_id);
+            state.function(id);
         },
         RefExpr::Cond{conditions, default}=>{
             state.start_scope();
@@ -624,12 +636,12 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
                     state.instructions.set(id, Instruction::JumpIfFalse(this_id));
                 }
                 
-                convert_single_expr(state, condition, NOT_TAIL);
+                convert_single_expr(state, todo_fns, condition, NOT_TAIL)?;
 
                 let id = state.instructions.push(Instruction::Exit);
                 prev_jf = Some(id);
 
-                convert_single_expr(state, body, is_tail);
+                convert_single_expr(state, todo_fns, body, is_tail)?;
 
                 if is_tail {
                     state.push_return();
@@ -647,7 +659,7 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
             }
 
             if let Some(default) = default {
-                convert_single_expr(state, *default, is_tail);
+                convert_single_expr(state, todo_fns, *default, is_tail)?;
                 if is_tail {
                     state.push_return();
                 }
@@ -666,20 +678,20 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
             }
         },
         RefExpr::Splat(expr)=>{
-            convert_single_expr(state, *expr, NOT_TAIL);
+            convert_single_expr(state, todo_fns, *expr, NOT_TAIL)?;
             state.splat();
         },
         RefExpr::Begin(exprs)=>{
             state.start_return_scope();
 
-            convert_exprs(state, exprs, is_tail);
+            convert_exprs(state, todo_fns, exprs, is_tail)?;
             
             state.end_scope();
         },
         RefExpr::List(exprs)=>{
             state.start_scope();
 
-            convert_exprs(state, exprs, is_tail);
+            convert_exprs(state, todo_fns, exprs, is_tail)?;
 
             if is_tail {
                 state.tail_call_or_list();
@@ -691,12 +703,13 @@ fn convert_single_expr<'a>(state: &mut ConvertState<'a>, expr: RefExpr<'a>, is_t
         RefExpr::Quote(_)=>todo!("Quote conversion"),
         RefExpr::Vector(_)=>todo!("Vector conversion"),
         RefExpr::Squiggle(_)=>todo!("Squiggle conversion"),
-    }
+        RefExpr::ReplDirective(_)=>bail!("Repl directives are not allowed here!"),
+    })
 }
 
-fn convert_fn<'a>(state: &mut ConvertState<'a>, func: RefFn<'a>, id: FnId) {
+fn convert_fn<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, RefFn<'a>)>, func: RefFn<'a>, id: FnId)->Result<()> {
     let name = func.name.map(|n|state.intern(n));
-    let sig = convert_signature(state, func.signature);
+    let sig = convert_signature(state, todo_fns, func.signature)?;
     let captures = func.captures
         .map(|c|c.items
             .into_iter()
@@ -711,18 +724,19 @@ fn convert_fn<'a>(state: &mut ConvertState<'a>, func: RefFn<'a>, id: FnId) {
         captures,
         sig,
     })).unwrap();
+    return Ok(());
 }
 
-fn convert_signature<'a>(state: &mut ConvertState<'a>, sig: RefFnSignature<'a>)->FnSignature {
+fn convert_signature<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, RefFn<'a>)>, sig: RefFnSignature<'a>)->Result<FnSignature> {
     match sig {
         RefFnSignature::Single(params, body)=>{
             let params = convert_vector(state, params);
 
             let body_ptr = state.next_ins_id();
-            convert_exprs(state, body, IS_TAIL);
+            convert_exprs(state, todo_fns, body, IS_TAIL)?;
             state.push_return();
 
-            return FnSignature::Single{params, body_ptr};
+            return Ok(FnSignature::Single{params, body_ptr});
         },
         RefFnSignature::Multi(items)=>{
             let mut exact = IndexMap::default();
@@ -734,7 +748,7 @@ fn convert_signature<'a>(state: &mut ConvertState<'a>, sig: RefFnSignature<'a>)-
                 let params = convert_vector(state, params);
 
                 let body_ptr = state.next_ins_id();
-                convert_exprs(state, body, IS_TAIL);
+                convert_exprs(state, todo_fns, body, IS_TAIL)?;
                 state.push_return();
 
                 if params.remainder.is_some() {
@@ -749,17 +763,17 @@ fn convert_signature<'a>(state: &mut ConvertState<'a>, sig: RefFnSignature<'a>)-
                 }
             }
 
-            return FnSignature::Multi {
+            return Ok(FnSignature::Multi {
                 exact,
                 max_exact,
                 at_least,
                 any,
-            };
+            });
         },
     }
 }
 
-fn convert_vector<'a>(state: &mut ConvertState<'a>, vector: RefVector<'a>)->Vector {
+fn convert_vector<'a>(state: &mut ConvertState, vector: RefVector<'a>)->Vector {
     let mut items = Vec::new();
     let mut remainder = None;
 

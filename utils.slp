@@ -7,53 +7,6 @@
     ([] (print "\n")))
 
 
-
-; (defn fib
-;     ([max]
-;         (cond
-;             ((< max 1) 0)
-;             (else (recur max 0 0 1))))
-;     ([max i prev1 prev2]
-;         (cond
-;             ((< i max) (recur max (+ 1 i) prev2 (+ prev1 prev2)))
-;             (else prev1))))
-
-; (defn fizzBuzz
-;     ([max] (recur max 1))
-;     ([max i]
-;         (def three (= 0 (% i 3)))
-;         (def five (= 0 (% i 5)))
-;         (cond
-;             ((<= i max) (begin
-;                 (cond
-;                     ((and three five) (println "FizzBuzz"))
-;                     (three (println "Fizz"))
-;                     (five (println "Buzz"))
-;                     (else (println i)))
-;                 (recur max (+ 1 i)))))))
-
-
-; (fizzBuzz 30)
-; (println (fib 19))
-
-
-; (defn createCounter
-;     ([] (recur 0))
-;     ([start]
-;         (def i start)
-;         (fn {i} []
-;             (def ret i)
-;             (+= i 1)
-;             ret)))
-
-; (def myCounter (createCounter))
-; (def anotherCounter (createCounter 15))
-
-; (println (myCounter))
-; (println (myCounter))
-; (println (anotherCounter))
-; (println (anotherCounter))
-
 (defn listIter [iterList]
     (def i 0)
     (fn {iterList i} []
@@ -158,35 +111,6 @@
         (fn [collection item] (+ collection item))))
 
 
-(defn iterFizzBuzz [max]
-    (forEach
-        (rangeInclusive 1 max)
-        (fn [i]
-            (def three (= 0 (% i 3)))
-            (def five (= 0 (% i 5)))
-            (cond
-                ((and three five) (println "FizzBuzz"))
-                (three (println "Fizz"))
-                (five (println "Buzz"))
-                (else (println i))))))
-
-
-(defn newDynList []
-    (object
-        (.$ (object
-            (.len (fn [obj]
-                (obj .__length)))
-            (.push (fn [obj item]
-                (+= (obj .inner) item)
-                (+= (obj .__length) 1)))
-            (.pop (fn [obj]
-                (-= (obj .__length) 1)
-                (listPop (obj .inner))))
-            (.index (fn [obj idx]
-                (index (obj .inner) idx)))))
-        (.inner (list))
-        (.__length 0)))
-
 (defn char2num [char]
     (cond
         ((= char \0) 0)
@@ -222,45 +146,3 @@
     (cond
         ((foldEnd .valid) (foldEnd .out))
         (else None)))
-
-
-; (def myList (newDynList))
-
-; (myList .newField 12345)
-; (println (myList .newField))
-
-; (println (myList .len))
-; (myList .push "A string")
-; (println (myList .index 0))
-; (println (myList .len))
-; (println (myList .pop))
-; (println (myList .len))
-
-; (println (intern .ident))
-
-
-; (def myChars (chars "Hello, world!"))
-
-; (def reversed (fold (revListIter myChars) "" (fn [start item] (+= start item))))
-; (println reversed)
-
-
-; (def line (readLine stdin))
-; (def reversed (fold (revListIter (chars line)) "" +))
-; (println reversed)
-
-
-; (def myData (read (open "example.slp")))
-; (print myData)
-
-; (iterFizzBuzz 30)
-(def num (str2num "1234"))
-
-(println num)
-(println (= num 1234))
-
-
-; (println (sum (range 0 10)))
-
-; (forEach (addOne (range 0 6)) (fn [val] (println val)))
-

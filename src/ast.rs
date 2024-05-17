@@ -1,5 +1,7 @@
 #[derive(Debug, PartialEq)]
 pub enum Expr<'a> {
+    ReplDirective(&'a str),
+
     Module(&'a str),
 
     Def {

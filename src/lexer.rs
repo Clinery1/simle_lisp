@@ -10,7 +10,7 @@ pub use StartOrEnd::*;
 #[logos(skip "[ \t\r\n]")]
 pub enum Token<'a> {
     /// all but whitespace, (), [], `#`, `'`, and `"`
-    #[regex("[^;\\\\ .\t\r\n()\\[\\]{}\"'`~#0-9][^ .\t\r\n()\\[\\]{}\"]*")]
+    #[regex("[^:;\\\\ .\t\r\n()\\[\\]{}\"'`~#0-9][^ .\t\r\n()\\[\\]{}\"]*")]
     Ident(&'a str),
 
     #[regex("\\.[^ .\t\r\n()\\[\\]{}\"]*", strip_first)]
@@ -39,6 +39,9 @@ pub enum Token<'a> {
 
     #[regex("#[^ \t\r\n()\"]+", strip_first)]
     HashLiteral(&'a str),
+
+    #[regex(":[^ .\t\r\n()\\[\\]{}\"]*", strip_first)]
+    ReplDirective(&'a str),
 
     #[token("(", |_|Start)]
     #[token(")", |_|End)]

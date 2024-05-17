@@ -12,7 +12,18 @@ use anyhow::{
     Result,
     bail,
 };
-use std::ops::Fn as FnTrait;
+use std::{
+    fmt::{
+        Display,
+        Formatter,
+        Result as FmtResult,
+    },
+    ops::{
+        Fn as FnTrait,
+        Deref,
+    },
+    error::Error,
+};
 use crate::{
     lexer::*,
     ast::*,
@@ -31,10 +42,26 @@ macro_rules! todo {
 }
 
 
-pub type ParseResult<T> = std::result::Result<T, SimpleError<String>>;
+#[derive(Debug)]
+pub struct ReplContinue(SimpleError<String>);
+impl Error for ReplContinue {}
+impl Display for ReplContinue {
+    fn fmt(&self, f: &mut Formatter)->FmtResult {
+        self.0.fmt(f)
+    }
+}
+impl Deref for ReplContinue {
+    type Target = SimpleError<String>;
+    fn deref(&self)->&Self::Target {
+        &self.0
+    }
+}
 
+pub struct ParserData {
+    repl: bool,
+}
 
-new_parser!(pub struct MyParser<'a, 1, Token<'a>, LogosTokenStream<'a, Token<'a>>>);
+new_parser!(pub struct MyParser<'a, 1, Token<'a>, LogosTokenStream<'a, Token<'a>>, ParserData>);
 impl<'a> MyParser<'a> {
     #[inline]
     fn next(&mut self)->Token<'a> {
@@ -51,17 +78,19 @@ impl<'a> MyParser<'a> {
         self.peek() == &t
     }
 
-    fn start_list(&mut self)->ParseResult<()> {
+    fn start_list(&mut self)->Result<()> {
         match self.next() {
             Token::List(Start)=>Ok(()),
-            _=>Err(self.error("Expected `(`")),
+            Token::EOF if self.user_data.repl=>bail!(ReplContinue(self.error("Unexpected EOF"))),
+            _=>bail!(self.error("Expected `(`")),
         }
     }
 
-    fn end_list(&mut self)->ParseResult<()> {
+    fn end_list(&mut self)->Result<()> {
         match self.next() {
             Token::List(End)=>Ok(()),
-            _=>Err(self.error("Expected `)`")),
+            Token::EOF if self.user_data.repl=>bail!(ReplContinue(self.error("Unexpected EOF"))),
+            _=>bail!(self.error("Expected `)`")),
         }
     }
 
@@ -73,42 +102,47 @@ impl<'a> MyParser<'a> {
         return false;
     }
 
-    fn start_vector(&mut self)->ParseResult<()> {
+    fn start_vector(&mut self)->Result<()> {
         match self.next() {
             Token::Vector(Start)=>Ok(()),
-            _=>Err(self.error("Expected `[`")),
+            Token::EOF if self.user_data.repl=>bail!(ReplContinue(self.error("Unexpected EOF"))),
+            _=>bail!(self.error("Expected `[`")),
         }
     }
 
-    fn end_vector(&mut self)->ParseResult<()> {
+    fn end_vector(&mut self)->Result<()> {
         match self.next() {
             Token::Vector(End)=>Ok(()),
-            _=>Err(self.error("Expected `]`")),
+            Token::EOF if self.user_data.repl=>bail!(ReplContinue(self.error("Unexpected EOF"))),
+            _=>bail!(self.error("Expected `]`")),
         }
     }
 
-    fn start_squiggle(&mut self)->ParseResult<()> {
+    fn start_squiggle(&mut self)->Result<()> {
         match self.next() {
             Token::Squiggle(Start)=>Ok(()),
-            _=>Err(self.error("Expected `{`")),
+            Token::EOF if self.user_data.repl=>bail!(ReplContinue(self.error("Unexpected EOF"))),
+            _=>bail!(self.error("Expected `{`")),
         }
     }
 
-    fn end_squiggle(&mut self)->ParseResult<()> {
+    fn end_squiggle(&mut self)->Result<()> {
         match self.next() {
             Token::Squiggle(End)=>Ok(()),
-            _=>Err(self.error("Expected `}`")),
+            Token::EOF if self.user_data.repl=>bail!(ReplContinue(self.error("Unexpected EOF"))),
+            _=>bail!(self.error("Expected `}`")),
         }
     }
 
-    fn match_ident(&mut self, i: &str)->ParseResult<()> {
+    fn match_ident(&mut self, i: &str)->Result<()> {
         match self.next() {
             Token::Ident(ti)=>if ti == i {
                 Ok(())
             } else {
-                Err(self.error(format!("Expected keyword `{i}`")))
+                bail!(self.error(format!("Expected keyword `{i}`")));
             },
-            _=>Err(self.error("Expected identifier")),
+            Token::EOF if self.user_data.repl=>bail!(ReplContinue(self.error("Unexpected EOF"))),
+            _=>bail!(self.error("Expected identifier")),
         }
     }
 
@@ -117,17 +151,19 @@ impl<'a> MyParser<'a> {
         self.0.error(msg)
     }
 
-    fn ident(&mut self)->ParseResult<&'a str> {
+    fn ident(&mut self)->Result<&'a str> {
         match self.next() {
             Token::Ident(i)=>Ok(i),
-            _=>Err(self.error("Unexpected token. Expected identifier")),
+            Token::EOF if self.user_data.repl=>bail!(ReplContinue(self.error("Unexpected EOF"))),
+            _=>bail!(self.error("Unexpected token. Expected identifier")),
         }
     }
 
-    fn dot_ident(&mut self)->ParseResult<&'a str> {
+    fn dot_ident(&mut self)->Result<&'a str> {
         match self.next() {
             Token::DotIdent(i)=>Ok(i),
-            _=>Err(self.error("Unexpected token. Expected dot identifier")),
+            Token::EOF if self.user_data.repl=>bail!(ReplContinue(self.error("Unexpected EOF"))),
+            _=>bail!(self.error("Unexpected token. Expected dot identifier")),
         }
     }
 
@@ -147,6 +183,7 @@ impl<'a> MyParser<'a> {
         }
 
         match self.next() {
+            Token::ReplDirective(s)=>Ok(Expr::ReplDirective(s)),
             Token::Number(n)=>Ok(Expr::Number(n)),
             Token::Float(f)=>Ok(Expr::Float(f)),
             Token::String(s)=>Ok(Expr::String(s)),
@@ -171,7 +208,11 @@ impl<'a> MyParser<'a> {
             // NOTE: Maybe change this?
             Token::Vector(_)=>bail!(self.error("Vectors are not allowed here")),
             Token::Squiggle(_)=>bail!(self.error("Squiggles are not allowed here")),
-            Token::EOF=>bail!(self.error("Unexpected EOF")),
+            Token::EOF=>if self.user_data.repl {
+                bail!(ReplContinue(self.error("Unexected EOF")));
+            } else {
+                bail!(self.error("Unexpected EOF"));
+            },
         }
     }
 
@@ -198,6 +239,7 @@ impl<'a> MyParser<'a> {
                 "begin"=>return self.parse_begin(),
                 "object"=>return self.parse_object(),
                 "module"=>return self.parse_module(),
+                "chain"=>return self.parse_chain(),
                 _=>{},
             },
             _=>{},
@@ -215,6 +257,30 @@ impl<'a> MyParser<'a> {
         items.insert(0, called);
 
         return Ok(Expr::List(items));
+    }
+
+    fn parse_chain(&mut self)->Result<Expr<'a>> {
+        self.match_ident("chain")?;
+
+        self.start_list()?;
+        let name = self.ident()?;
+        let mut items = vec![Expr::Def {
+            name,
+            data: Box::new(self.parse_expr()?),
+        }];
+        self.end_list()?;
+
+        while !self.try_end_list() {
+            let data = self.parse_expr().map(Box::new)?;
+            items.push(Expr::Set {
+                name,
+                data,
+            });
+        }
+
+        items.push(Expr::Ident(name));
+
+        return Ok(Expr::Begin(items));
     }
 
     fn parse_module(&mut self)->Result<Expr<'a>> {
@@ -500,7 +566,12 @@ impl<'a> MyParser<'a> {
             Token::Vector(End)=>bail!(self.error("Unexpected `]`")),
             Token::Squiggle(End)=>bail!(self.error("Unexpected `}`")),
             Token::List(End)=>bail!(self.error("Unexpected `)`")),
-            Token::EOF=>bail!(self.error("Unexpected EOF")),
+            Token::EOF=>if self.user_data.repl {
+                bail!(ReplContinue(self.error("Unexpected EOF")));
+            } else {
+                bail!(self.error("Unexpected EOF"));
+            },
+            Token::ReplDirective(_)=>bail!(self.error("Repl directives are only allowed at the root level")),
         }
     }
 
@@ -534,5 +605,10 @@ impl<'a> MyParser<'a> {
 
 pub fn new_parser<'a>(source: &'a str)->MyParser<'a> {
     use logos::Logos;
-    MyParser::new(Token::lexer(source), ())
+    MyParser::new(Token::lexer(source), ParserData {repl: false})
+}
+
+pub fn repl_new_parser<'a>(source: &'a str)->MyParser<'a> {
+    use logos::Logos;
+    MyParser::new(Token::lexer(source), ParserData {repl: true})
 }

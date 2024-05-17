@@ -11,7 +11,7 @@ use super::{
 
 
 pub fn gc_collect(_args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
-    let count = i.data.collect(&i.call_stack, &i.scopes);
+    let count = i.gc_collect();
     return Ok(i.alloc(Data::Number(count as i64)));
 }
 

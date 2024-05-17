@@ -261,8 +261,7 @@ impl Drop for Interpreter {
     }
 }
 impl Interpreter {
-    pub fn new<'a>(raw: Vec<crate::ast::Expr<'a>>)->(Self, ConvertState<'a>) {
-        let mut state = convert(raw);
+    pub fn new<'a>(state: &mut ConvertState)->Self {
         let mut root_env = Env::new();
         root_env.push_scope();
         let mut data = DataStore::new();
@@ -299,7 +298,7 @@ impl Interpreter {
 
         // println!("Line: {}", line!());
 
-        (Interpreter {
+        Interpreter {
             var_count: root_env.var_count(),
             root_env,
             env_stack: Stack::new(),
@@ -309,7 +308,11 @@ impl Interpreter {
             call_stack: Stack::new(),
             scopes: Stack::new(),
             metrics: Metrics::default(),
-        }, state)
+        }
+    }
+
+    pub fn gc_collect(&mut self)->usize {
+        self.data.collect(&self.call_stack, &self.scopes)
     }
 
     pub fn push_env(&mut self) {
@@ -440,12 +443,16 @@ impl Interpreter {
 
     // TODO: Make `DataStore` aware of the data in `scopes` and `call_stack` before we do a GC and
     // cause a use-after-free bug
-    pub fn run(&mut self, state: &mut ConvertState)->Result<Option<DataRef>> {
+    pub fn run(&mut self, state: &mut ConvertState, start_id: Option<InstructionId>)->Result<Option<DataRef>> {
         const MAX_ITERS: usize = 10000;
 
         let start = Instant::now();
 
         let mut iter = state.instructions.iter();
+
+        if let Some(start_id) = start_id {
+            iter.jump(start_id);
+        }
 
         self.scopes.push(ScopeItem::Return(None));
 
@@ -668,7 +675,7 @@ impl Interpreter {
                                 self.metrics.max_call_stack_depth = self.metrics.max_call_stack_depth
                                     .max(self.call_stack.len() as u16);
                             },
-                            _=>bail!("Arg0 is not callable!"),
+                            arg=>bail!("Arg0 is not callable! {:?}", arg),
                         }
                     }
                 },
@@ -774,7 +781,7 @@ impl Interpreter {
                                     }
                                 }
                             },
-                            _=>bail!("Arg0 is not callable!"),
+                            arg=>bail!("Arg0 is not callable! {:?}", arg),
                         }
                     }
                 },
