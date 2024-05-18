@@ -8,8 +8,18 @@ use super::{
     Interner,
     Data,
     DataRef,
+    NativeFn,
+    ArgCount,
     // DEBUG,
 };
+
+
+pub const BUILTINS: &[(&str, NativeFn, ArgCount)] = &[
+    builtin!(format, Any),
+    builtin!(debug_format, debugFormat, Any),
+    builtin!(split, 2),
+    builtin!(chars, 1),
+];
 
 
 pub fn format(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
@@ -22,6 +32,41 @@ pub fn format(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result
 }
 
 pub fn format_data(fmt: &mut String, data: &Data) {
+    match data {
+        Data::Char(c)=>write!(fmt, "\\{c}").unwrap(),
+        Data::List(items)=>{
+            write!(fmt, "(").unwrap();
+            for (i, data) in items.into_iter().enumerate() {
+                if i > 0 {write!(fmt, " ").unwrap()}
+                format_data(fmt, &data.get_data());
+            }
+            write!(fmt, ")").unwrap();
+        },
+
+        Data::String(s)=>write!(fmt, "{s}").unwrap(),
+        Data::Number(n)=>write!(fmt, "{n}").unwrap(),
+        Data::Float(f)=>write!(fmt, "{f}").unwrap(),
+        Data::Bool(b)=>write!(fmt, "{b}").unwrap(),
+
+        Data::Fn(_)|Data::Closure{..}=>write!(fmt, "<fn>").unwrap(),
+        Data::NativeFn(name, _, _)=>write!(fmt, "<nativeFn: {name}>").unwrap(),
+        Data::None=>write!(fmt, "None").unwrap(),
+        Data::NativeData(_)=>write!(fmt, "<nativeData>").unwrap(),
+        Data::Object(_)=>write!(fmt, "<object>").unwrap(),
+        Data::Ident(_)=>write!(fmt, "<ident>").unwrap(),
+    }
+}
+
+pub fn debug_format(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
+    let mut fmt = String::new();
+    for arg in args {
+        debug_format_data(&mut fmt, &arg.get_data());
+    }
+
+    return Ok(i.alloc(Data::String(fmt.into())));
+}
+
+pub fn debug_format_data(fmt: &mut String, data: &Data) {
     match data {
         Data::Char(c)=>match c {
             ' '=>write!(fmt, "\\space").unwrap(),

@@ -1,5 +1,9 @@
+; TODO: Change the code style to use paths more often
+; TODO: Fix the "fold is undefined" error we have (it really is defined!)
+
+
 (defn print [& args]
-    (write stdout (format ...args))
+    (std/io/write std/io/stdout (std/io/format ...args))
     None)
 
 (defn println
@@ -58,15 +62,15 @@
     (def i 0)
     (fn {iterList i} []
         (cond
-            ((< i (length iterList))
+            ((< i (core/length iterList))
                 (begin
-                    (def idx (clone i))
+                    (def idx (core/clone i))
                     (+= i 1)
-                    (index iterList idx)))
+                    (core/index iterList idx)))
             (else None))))
 (defn revListIter [iterList]
     (fn {iterList} []
-        (listPop iterList)))
+        (core/listPop iterList)))
 
 (defn range [start end]
     (def i start)
@@ -74,7 +78,7 @@
         (cond
             ((< i end)
                 (begin
-                    (def ret (clone i))
+                    (def ret (core/clone i))
                     (+= i 1)
                     ret))
             (else None))))
@@ -83,7 +87,7 @@
     (fn {i endInclusive} []
         (cond
             ((<= i endInclusive) (begin
-                (def ret (clone i))
+                (def ret (core/clone i))
                 (+= i 1)
                 ret))
             (else None))))
@@ -118,7 +122,7 @@
         (cond
             ((= val None) None)
             (else (begin
-                (def out (list (clone i) val))
+                (def out (core/list (core/clone i) val))
                 (+= i 1)
                 out)))))
 
@@ -154,7 +158,7 @@
 (defn collectList [iter]
     (fold
         iter
-        (list)
+        (core/list)
         (fn [collection item] (+ collection item))))
 
 
@@ -181,10 +185,10 @@
                 (+= (obj .__length) 1)))
             (.pop (fn [obj]
                 (-= (obj .__length) 1)
-                (listPop (obj .inner))))
+                (core/listPop (obj .inner))))
             (.index (fn [obj idx]
-                (index (obj .inner) idx)))))
-        (.inner (list))
+                (core/index (obj .inner) idx)))))
+        (.inner (core/list))
         (.__length 0)))
 
 (defn char2num [char]

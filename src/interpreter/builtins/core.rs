@@ -7,7 +7,24 @@ use super::{
     Interner,
     Data,
     DataRef,
+    NativeFn,
+    ArgCount,
 };
+
+
+pub const BUILTINS: &[(&str, NativeFn, ArgCount)] = &[
+    // core
+    builtin!(gc_collect, gcCollect, 0),
+    builtin!(and, Any),
+    builtin!(or, Any),
+    builtin!(index, 2),
+    builtin!(list, Any),
+    builtin!(length, 1),
+    builtin!(list_pop, listPop, 1),
+    builtin!(clone, 1),
+    builtin!(debug, Any),
+    builtin!(intern, 1),
+];
 
 
 pub fn gc_collect(_args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {

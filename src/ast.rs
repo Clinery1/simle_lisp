@@ -16,6 +16,8 @@ pub enum Expr<'a> {
     /// Named function definition is just sugar for `VarDef {init: Fn(...) ...}`
     Fn(Fn<'a>),
 
+    Path(Vec<&'a str>),
+
     Cond {
         conditions: Vec<(Self, Self)>,
         default: Option<Box<Self>>,

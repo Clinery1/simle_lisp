@@ -7,6 +7,8 @@ use super::{
     Interner,
     Data,
     DataRef,
+    NativeFn,
+    ArgCount,
 };
 
 
@@ -85,6 +87,28 @@ macro_rules! define_arithmetic_assign_func {
         }
     };
 }
+
+
+pub const BUILTINS: &[(&str, NativeFn, ArgCount)] = &[
+    builtin!(add, +, Any),
+    builtin!(sub, -, Any),
+    builtin!(mul, *, Any),
+    builtin!(div, /, Any),
+    builtin!(modulo, %, Any),
+
+    builtin!(add_assign, +=, Any),
+    builtin!(sub_assign, -=, Any),
+    builtin!(mul_assign, *=, Any),
+    builtin!(div_assign, /=, Any),
+    builtin!(modulo_assign, %=, Any),
+
+    builtin!(equal, =, Any),
+    builtin!(not_equal, !=, Any),
+    builtin!(greater, >, Any),
+    builtin!(less, <, Any),
+    builtin!(greater_equal, >=, Any),
+    builtin!(less_equal, <=, Any),
+];
 
 
 fn do_the_thing_add(d1: &mut Data, d2: &Data)->Result<()> {

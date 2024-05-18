@@ -403,7 +403,7 @@ impl DataStore {
         // set generation of external items in the previous call stacks
         let call_stack_iter = call_stack.iter();
         let call_scopes_iter = call_stack_iter
-            .map(|(_, scopes, _)|scopes.iter())
+            .map(|(_, scopes)|scopes.iter())
             .flatten();
         let call_item_iter = call_scopes_iter
             .map(|items|items.iter())

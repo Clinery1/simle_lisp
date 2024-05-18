@@ -20,8 +20,18 @@ use super::{
     Data,
     DataRef,
     NativeData,
+    NativeFn,
+    ArgCount,
     // DEBUG,
 };
+
+
+pub const BUILTINS: &[(&str, NativeFn, ArgCount)] = &[
+    builtin!(open, 1),
+    builtin!(read_line, readLine, 1),
+    builtin!(read, 1),
+    builtin!(write, 2),
+];
 
 
 pub fn open(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {

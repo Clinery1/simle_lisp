@@ -10,8 +10,11 @@ pub use StartOrEnd::*;
 #[logos(skip "[ \t\r\n]")]
 pub enum Token<'a> {
     /// all but whitespace, (), [], `#`, `'`, and `"`
-    #[regex("[^:;\\\\ .\t\r\n()\\[\\]{}\"'`~#0-9][^ .\t\r\n()\\[\\]{}\"]*")]
+    #[regex("[^/:;\\\\ .\t\r\n()\\[\\]{}\"'#0-9][^/ .\t\r\n()\\[\\]{}\"]*")]
     Ident(&'a str),
+
+    #[regex("[^/:;\\\\ .\t\r\n()\\[\\]{}\"'#0-9][^/ .\t\r\n()\\[\\]{}\"]*/", parse_path)]
+    Path(Vec<&'a str>),
 
     #[regex("\\.[^ .\t\r\n()\\[\\]{}\"]*", strip_first)]
     DotIdent(&'a str),
@@ -136,4 +139,69 @@ fn parse_char<'a>(l: &mut Lexer<'a, Token<'a>>)->Option<char> {
     let c = l.remainder().chars().next()?;
     l.bump(c.len_utf8());
     return Some(c);
+}
+
+fn parse_path<'a>(l: &mut Lexer<'a, Token<'a>>)->Vec<&'a str> {
+    let mut out = Vec::new();
+    let len = l.slice().len();
+    out.push(&l.slice()[..(len - 1)]);
+
+    let mut slice_start = 0;
+    let mut count = 0;
+    for c in l.remainder().chars() {
+        if slice_start == count {
+            match c {
+                '/'=>panic!("Cannot have a path section of zero length!"),
+                ':'|
+                    ';'|
+                    '\\'|
+                    ' '|
+                    '.'|
+                    '\t'|
+                    '\r'|
+                    '\n'|
+                    '('|
+                    ')'|
+                    '['|
+                    ']'|
+                    '{'|
+                    '}'|
+                    '"'|
+                    '\''|
+                    '#'|
+                    '0'..='9'=>break,
+                _=>{},
+            }
+        } else {
+            match c {
+                '/'=>{
+                    out.push(&l.remainder()[slice_start..count]);
+                    slice_start = count + 1;
+                },
+                ':'|
+                    ';'|
+                    '\\'|
+                    ' '|
+                    '.'|
+                    '\t'|
+                    '\r'|
+                    '\n'|
+                    '('|
+                    ')'|
+                    '['|
+                    ']'|
+                    '{'|
+                    '}'|
+                    '"'|
+                    '\''=>break,
+                _=>{},
+            }
+        }
+        count += c.len_utf8()
+    }
+    out.push(&l.remainder()[slice_start..count]);
+
+    l.bump(count);
+
+    return out;
 }

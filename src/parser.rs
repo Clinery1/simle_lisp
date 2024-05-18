@@ -193,6 +193,7 @@ impl<'a> MyParser<'a> {
             } else {
                 Ok(Expr::Ident(i))
             },
+            Token::Path(path)=>Ok(Expr::Path(path)),
             Token::DotIdent(s)=>Ok(Expr::DotIdent(s)),
             Token::HashLiteral(lit)=>self.match_hash_literal(lit),
             Token::Comment(c)=>Ok(Expr::Comment(c)),
@@ -311,6 +312,7 @@ impl<'a> MyParser<'a> {
                 return Ok(Field::Full(name, e));
             },
             Token::DotIdent(_)=>Ok(Field::Shorthand(self.dot_ident()?)),
+            Token::EOF=>bail!(ReplContinue(self.error("Unexpected token. Expected `(` or `[`"))),
             _=>bail!("Unexpected token. Expected `(` or DotIdent"),
         }
     }
@@ -366,6 +368,7 @@ impl<'a> MyParser<'a> {
             Token::List(Start)=>{},    // we are an overloaded function, so continue.
             Token::Vector(Start)=>return self.parse_fn_param_body()
                 .map(|(param, body)|(captures, FnSignature::Single(param, body))),
+            Token::EOF=>bail!(ReplContinue(self.error("Unexpected token. Expected `(` or `[`"))),
             _=>{
                 self.next();
                 bail!(self.error("Unexpected token. Expected `(` or `[`"));
@@ -495,6 +498,7 @@ impl<'a> MyParser<'a> {
         while !self.is_next_token(Token::Squiggle(End)) {
             match self.next() {
                 Token::Ident(i)=>items.push(i),
+                Token::EOF=>bail!(ReplContinue(self.error("Unexpected token. Expected `(` or `[`"))),
                 _=>bail!(self.error("Squiggles can only have identifiers")),
             }
         }
@@ -520,6 +524,7 @@ impl<'a> MyParser<'a> {
                     break;
                 },
                 Token::Ident(i)=>items.push(i),
+                Token::EOF=>bail!(ReplContinue(self.error("Unexpected token. Expected `(` or `[`"))),
                 _=>bail!(self.error("Vectors can only have identifiers")),
             }
         }
@@ -544,6 +549,7 @@ impl<'a> MyParser<'a> {
             } else {
                 Ok(Expr::Ident(i))
             },
+            Token::Path(path)=>Ok(Expr::Path(path)),
             Token::HashLiteral(lit)=>self.match_hash_literal(lit),
             Token::Comment(c)=>Ok(Expr::Comment(c)),
             Token::Quote=>self.parse_expr_quoted()

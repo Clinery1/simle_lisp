@@ -7,8 +7,15 @@ use super::{
     Interner,
     Data,
     DataRef,
+    NativeFn,
+    ArgCount,
     // DEBUG,
 };
+
+
+pub const BUILTINS: &[(&str, NativeFn, ArgCount)] = &[
+    builtin!(split_list, splitList, 2),
+];
 
 
 pub fn split_list(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {

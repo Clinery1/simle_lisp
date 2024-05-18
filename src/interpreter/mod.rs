@@ -32,7 +32,7 @@ pub mod data;
 // mod new_data;
 
 
-pub type CallStack = Stack<(InstructionId, Scopes, FnId)>;
+pub type CallStack = Stack<(InstructionId, Scopes)>;
 pub type Scopes = Stack<ScopeItem>;
 
 pub type NativeFn = fn(Vec<DataRef>, &mut Interpreter, &mut Interner)->Result<DataRef>;
@@ -127,6 +127,23 @@ impl Env {
             vars: IdentMap::default(),
             scopes: Stack::new(),
         }
+    }
+
+    pub fn into_root_scope(mut self)->IdentMap<DataRef> {
+        while self.scopes.len() > 1 {
+            self.pop_scope();
+        }
+
+        let mut out = IdentMap::default();
+        for (i, mut scope) in self.vars.drain() {
+            if scope.len() == 1 {
+                out.insert(i, scope.pop().unwrap().inner());
+            } else if scope.len() > 1 {
+                panic!("Scope len should be one! This is a bug!");
+            }
+        }
+
+        return out;
     }
 
     pub fn clear(&mut self)->usize {
@@ -264,7 +281,7 @@ impl Interpreter {
     pub fn new<'a>(state: &mut ConvertState)->Self {
         let mut root_env = Env::new();
         root_env.push_scope();
-        let mut data = DataStore::new();
+        let data = DataStore::new();
 
         // println!("Line: {}", line!());
 
@@ -272,33 +289,7 @@ impl Interpreter {
             println!("{warning}");
         }
 
-        // println!("Line: {}", line!());
-
-        for (name, func, arg_count) in builtins::BUILTINS.into_iter() {
-            // println!("NativeFn: {name}");
-            // println!("Line: {}", line!());
-            let ident = state.interner.intern(*name);
-            // println!("Line: {}", line!());
-            let data = data.insert(Data::NativeFn(name, *func, *arg_count));
-            data.set_pinned();
-            // println!("Line: {}", line!());
-            root_env.insert(ident, data);
-            // println!("Line: {}", line!());
-        }
-
-        let stdout_dr = data.insert(Data::NativeData(NativeData::Stdout));
-        let stdin = Rc::new(RefCell::new(BufReader::new(stdin())));
-        let stdin_dr = data.insert(Data::NativeData(NativeData::Stdin(stdin)));
-
-        stdout_dr.set_pinned();
-        stdin_dr.set_pinned();
-
-        root_env.insert(state.interner.intern("stdout"), stdout_dr);
-        root_env.insert(state.interner.intern("stdin"), stdin_dr);
-
-        // println!("Line: {}", line!());
-
-        Interpreter {
+        let mut out = Interpreter {
             var_count: root_env.var_count(),
             root_env,
             env_stack: Stack::new(),
@@ -308,7 +299,74 @@ impl Interpreter {
             call_stack: Stack::new(),
             scopes: Stack::new(),
             metrics: Metrics::default(),
+        };
+
+        out.insert_builtins(state);
+
+        return out;
+    }
+
+    fn insert_builtins(&mut self, state: &mut ConvertState) {
+        let mut core_object = IdentMap::default();
+        for (name, func, arg_count) in builtins::core::BUILTINS.into_iter() {
+            let ident = state.interner.intern(*name);
+            let data = self.data.insert(Data::NativeFn(name, *func, *arg_count));
+            data.set_pinned();
+            core_object.insert(ident, data);
         }
+        self.root_env.insert(state.intern("core"), self.data.insert(Data::Object(core_object)));
+
+        // Math operations are imported at the root level by default
+        for (name, func, arg_count) in builtins::arithmetic::BUILTINS.into_iter() {
+            let ident = state.interner.intern(*name);
+            let data = self.data.insert(Data::NativeFn(name, *func, *arg_count));
+            data.set_pinned();
+            self.root_env.insert(ident, data);
+        }
+
+        let mut string_object = IdentMap::default();
+        for (name, func, arg_count) in builtins::string::BUILTINS.into_iter() {
+            let ident = state.interner.intern(*name);
+            let data = self.data.insert(Data::NativeFn(name, *func, *arg_count));
+            data.set_pinned();
+            string_object.insert(ident, data);
+        }
+
+        let mut misc_object = IdentMap::default();
+        for (name, func, arg_count) in builtins::misc::BUILTINS.into_iter() {
+            let ident = state.interner.intern(*name);
+            let data = self.data.insert(Data::NativeFn(name, *func, *arg_count));
+            data.set_pinned();
+            misc_object.insert(ident, data);
+        }
+
+        let mut io_object = IdentMap::default();
+        for (name, func, arg_count) in builtins::io::BUILTINS.into_iter() {
+            let ident = state.interner.intern(*name);
+            let data = self.data.insert(Data::NativeFn(name, *func, *arg_count));
+            data.set_pinned();
+            io_object.insert(ident, data);
+        }
+
+        let stdout_dr = self.data.insert(Data::NativeData(NativeData::Stdout));
+        let stdin = Rc::new(RefCell::new(BufReader::new(stdin())));
+        let stdin_dr = self.data.insert(Data::NativeData(NativeData::Stdin(stdin)));
+
+        stdout_dr.set_pinned();
+        stdin_dr.set_pinned();
+        io_object.insert(state.interner.intern("stdout"), stdout_dr);
+        io_object.insert(state.interner.intern("stdin"), stdin_dr);
+
+        let string_data = self.data.insert(Data::Object(string_object));
+        let misc_data = self.data.insert(Data::Object(misc_object));
+        let io_data = self.data.insert(Data::Object(io_object));
+
+        let mut std_object = IdentMap::default();
+        std_object.insert(state.intern("string"), string_data);
+        std_object.insert(state.intern("misc"), misc_data);
+        std_object.insert(state.intern("io"), io_data);
+
+        self.root_env.insert(state.intern("std"), self.data.insert(Data::Object(std_object)));
     }
 
     pub fn gc_collect(&mut self)->usize {
@@ -477,10 +535,25 @@ impl Interpreter {
                 I::Exit=>break,
 
                 I::ReturnModule=>{
-                    todo!("Modules");
+                    let module = self.env_to_object();
+                    let (ret_id, ret_scopes) = self.call_stack.pop().unwrap();
+
+                    iter.jump(ret_id);
+                    self.scopes = ret_scopes;
+                    self.push_to_scope(module);
                 },
-                I::Module(_id)=>{
-                    todo!("Modules");
+                I::Module(id)=>{
+                    let module = state.modules.get(*id);
+
+                    // standard "save the current call frame"
+                    let next_ins_id = iter.next_ins_id().unwrap();
+                    let old_scopes = replace(&mut self.scopes, Stack::new());
+                    self.call_stack.push((next_ins_id, old_scopes));
+                    self.scopes.push(ScopeItem::Return(None));
+                    self.push_env();
+                    self.push_env_scope();
+
+                    iter.jump(module.start_ins);
                 },
 
                 I::Define(i)=>{
@@ -521,6 +594,29 @@ impl Interpreter {
                         map.insert(field, data);
                     }
                     self.push_to_scope(Data::Object(map));
+                },
+
+                I::Path(path)=>{
+                    let mut path_iter = path.iter().copied();
+                    let mut obj = self.get_var(path_iter.next().unwrap(), &state.interner)?;
+                    for name in path_iter {
+                        let data = obj.get_data();
+                        match &*data {
+                            Data::Object(fields)=>{
+                                if let Some(dr) = fields.get(&name) {
+                                    let dr = dr.clone();
+                                    drop(data);
+
+                                    obj = dr;
+                                } else {
+                                    bail!("Object does not have a field named {}", state.interner.get(name));
+                                }
+                            },
+                            _=>bail!("Paths can only be used on `Object`s"),
+                        }
+                    }
+
+                    self.push_dr_to_scope(obj);
                 },
 
                 I::DotIdent(i)=>self.push_to_scope(Data::Ident(*i)),
@@ -622,7 +718,7 @@ impl Interpreter {
 
                                 let next_ins_id = iter.next_ins_id().unwrap();
                                 let old_scopes = replace(&mut self.scopes, Stack::new());
-                                self.call_stack.push((next_ins_id, old_scopes, *id));
+                                self.call_stack.push((next_ins_id, old_scopes));
                                 self.scopes.push(ScopeItem::Return(None));
                                 self.push_env();
                                 self.push_env_scope();
@@ -649,7 +745,7 @@ impl Interpreter {
 
                                 let next_ins_id = iter.next_ins_id().unwrap();
                                 let old_scopes = replace(&mut self.scopes, Stack::new());
-                                self.call_stack.push((next_ins_id, old_scopes, *id));
+                                self.call_stack.push((next_ins_id, old_scopes));
                                 self.scopes.push(ScopeItem::Return(None));
                                 self.push_env();
                                 self.push_env_scope();
@@ -788,12 +884,8 @@ impl Interpreter {
                 I::Return=>{
                     // dbg!(&self.scopes);
                     let last = self.pop_from_scope();
-                    if last.is_none() {
-                        println!("--------- No return value");
-                    }
                     let last = last.unwrap_or_else(||self.alloc(Data::List(Vec::new())));
-                    let (ret_id, ret_scopes, fn_id) = self.call_stack.pop().unwrap();
-                    self.debug_return(fn_id, state);
+                    let (ret_id, ret_scopes) = self.call_stack.pop().unwrap();
 
                     self.pop_env();
 
@@ -867,6 +959,14 @@ impl Interpreter {
         return Ok(self.pop_from_scope());
     }
 
+    fn env_to_object(&mut self)->Data {
+        self.env_stack
+            .pop()
+            .map(Env::into_root_scope)
+            .map(Data::Object)
+            .unwrap()
+    }
+
     fn set_func_args(&mut self, id: FnId, params: &Vector, args: Vec<DataRef>, interner: &Interner)->Result<()> {
         let mut args_iter = args.into_iter();
 
@@ -930,6 +1030,7 @@ impl Interpreter {
         }
     }
 
+    #[allow(dead_code)]
     fn debug_return(&self, id: FnId, state: &ConvertState) {
         if !DEBUG {return}
 

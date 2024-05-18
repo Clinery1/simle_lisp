@@ -17,17 +17,28 @@ use std::{
         Hasher,
         Hash,
     },
-    // fs::read_to_string,
+    fmt::{
+        Display,
+        Formatter,
+        Result as FmtResult,
+    },
+    error::Error as ErrorTrait,
+    result::Result as StdResult,
+    collections::VecDeque,
+    fs::read_to_string,
+    path::PathBuf,
     rc::Rc,
 };
-use crate::ast::{
-    Expr as RefExpr,
-    Field as RefField,
-    FnSignature as RefFnSignature,
-    Vector as RefVector,
-    Fn as RefFn,
+use crate::{
+    ast::{
+        Expr as RefExpr,
+        Field as RefField,
+        FnSignature as RefFnSignature,
+        Vector as RefVector,
+        Fn as RefFn,
+    },
+    error_trace,
 };
-// use super::IdentMap;
 
 
 const IS_TAIL: bool = true;
@@ -54,6 +65,8 @@ pub enum Instruction {
     DotIdent(Ident),
 
     Object(Vec<Ident>),
+
+    Path(Vec<Ident>),
 
     Number(i64),
     Float(f64),
@@ -131,6 +144,16 @@ impl FnSignature {
                 return None;
             },
         }
+    }
+}
+
+
+#[derive(Debug)]
+pub struct ModuleError;
+impl ErrorTrait for ModuleError {}
+impl Display for ModuleError {
+    fn fmt(&self, f: &mut Formatter)->FmtResult {
+        write!(f, "Module error")
     }
 }
 
@@ -322,13 +345,13 @@ impl<'a> Iterator for InstructionIter<'a> {
     }
 }
 
-#[allow(dead_code)]
-pub struct Module {
-    start: InstructionId,
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ModuleId(usize);
+impl ModuleId {
+    pub const fn root()->Self {
+        ModuleId(0)
+    }
+}
 impl Hash for ModuleId {
     fn hash<H: Hasher>(&self, hasher: &mut H) {
         hasher.write_usize(self.0);
@@ -344,7 +367,7 @@ pub struct ConvertState {
     pub fns: SlotMap<FnId, Rc<Fn>>,
     pub warnings: Vec<Error>,
     pub instructions: InstructionStore,
-    pub modules: SlotMap<ModuleId, Module>,
+    pub modules: ModuleTree,
 }
 #[allow(dead_code)]
 impl ConvertState {
@@ -354,7 +377,7 @@ impl ConvertState {
             fns: SlotMap::new(),
             warnings: Vec::new(),
             instructions: InstructionStore::new(),
-            modules: SlotMap::new(),
+            modules: ModuleTree::new(),
         }
     }
     #[inline]
@@ -380,6 +403,11 @@ impl ConvertState {
     #[inline]
     pub fn push_return(&mut self) {
         self.instructions.push(Instruction::Return);
+    }
+
+    #[inline]
+    pub fn push_module_return(&mut self) {
+        self.instructions.push(Instruction::ReturnModule);
     }
 
     pub fn define(&mut self, i: &str) {
@@ -496,6 +524,14 @@ impl ConvertState {
         self.instructions.push(Instruction::StartReturnScope);
     }
 
+    pub fn push_path(&mut self, path: Vec<&str>) {
+        let path = path.into_iter()
+            .map(|s|self.intern(s))
+            .collect();
+        self.instructions.push(Instruction::Path(path));
+    }
+
+    #[inline]
     pub fn reserve_func(&mut self)->FnId {
         self.fns.reserve_slot()
     }
@@ -519,57 +555,206 @@ impl ConvertState {
     }
 }
 
+#[derive(Debug)]
+pub struct ModuleNode {
+    pub name: Ident,
+    pub children: Vec<ModuleId>,
 
-pub fn convert<'a>(old: Vec<RefExpr<'a>>)->Result<ConvertState> {
+    pub parent: Option<ModuleId>,
+
+    pub start_ins: InstructionId,
+}
+
+pub struct ModuleTree {
+    tree: SlotMap<ModuleId, ModuleNode>,
+}
+impl ModuleTree {
+    pub fn new()->Self {
+        ModuleTree {
+            tree: SlotMap::new(),
+        }
+    }
+
+    #[inline]
+    pub fn reserve_slot(&mut self)->ModuleId {
+        self.tree.reserve_slot()
+    }
+
+    #[inline]
+    pub fn insert_reserved(&mut self, id: ModuleId, node: ModuleNode)->StdResult<(), ModuleNode> {
+        self.tree.insert_reserved(id, node)
+    }
+
+    pub fn get(&self, id: ModuleId)->&ModuleNode {
+        self.tree.get(id).unwrap()
+    }
+}
+
+struct TodoModule {
+    name: String,
+    id: ModuleId,
+    parent: ModuleId,
+    path: PathBuf,
+}
+
+struct Todos<'a, 'b> {
+    pub fns: VecDeque<(FnId, RefFn<'a>)>,
+    pub modules: &'b mut VecDeque<TodoModule>,
+
+    /// Helper to temporarily store the children of the current module
+    pub new_modules: Vec<ModuleId>,
+    /// Stores the current module
+    pub current_module: ModuleId,
+
+    pub module_path: PathBuf,
+}
+impl<'a, 'b> Todos<'a, 'b> {
+    fn new(modules: &'b mut VecDeque<TodoModule>)->Self {
+        Todos {
+            fns: VecDeque::new(),
+            modules,
+            new_modules: Vec::new(),
+            current_module: ModuleId::root(),
+            module_path: PathBuf::new(),
+        }
+    }
+
+    fn queue_fn(&mut self, id: FnId, f: RefFn<'a>) {
+        self.fns.push_back((id, f));
+    }
+
+    fn queue_module(&mut self, id: ModuleId, name: &str) {
+        self.new_modules.push(id);
+
+        self.modules.push_back(TodoModule {
+            name: name.to_string(),
+            id,
+            parent: self.current_module,
+            path: self.module_path.clone(),
+        });
+    }
+}
+
+
+pub fn convert<'a>(exprs: Vec<RefExpr<'a>>)->Result<ConvertState> {
     let mut state = ConvertState::new();
-    let mut todo_fns = Vec::new();
+    let mut module_todos = VecDeque::new();
+    let mut todos = Todos::new(&mut module_todos);
+    let root_module = state.reserve_module();
+    todos.current_module = root_module;
 
-    convert_exprs(&mut state, &mut todo_fns, old, false)?;
+    let start_ins = state.next_ins_id();
+    convert_exprs(&mut state, &mut todos, exprs, false)?;
 
     state.push_exit();
     
-    while let Some((id, f)) = todo_fns.pop() {
-        convert_fn(&mut state, &mut todo_fns, f, id)?;
+    while let Some((id, f)) = todos.fns.pop_back() {
+        convert_fn(&mut state, &mut todos, f, id)?;
     }
 
-    // while let  Some((id, path)) = state.todo_modules.pop() {
-    //     convert_module(&mut state, path, id);
-    // }
+    let root_children = todos.new_modules;
+    let name = state.intern("root");
+    state.modules.insert_reserved(root_module, ModuleNode {
+        name,
+        children: root_children,
+        parent: None,
+        start_ins,
+    }).unwrap();
+
+    while let Some(todo) = module_todos.pop_back() {
+        convert_module(&mut state, &mut module_todos, todo)?;
+    }
 
     return Ok(state);
 }
 
 pub fn repl_convert<'a>(state: &mut ConvertState, exprs: Vec<RefExpr<'a>>)->Result<InstructionId> {
     let start_id = state.next_ins_id();
-    let mut todo_fns = Vec::new();
-    convert_exprs(state, &mut todo_fns, exprs, false)?;
+    let mut module_todos = VecDeque::new();
+    let mut todos = Todos::new(&mut module_todos);
+    convert_exprs(state, &mut todos, exprs, false)?;
 
     state.push_exit();
     
-    while let Some((id, f)) = todo_fns.pop() {
-        convert_fn(state, &mut todo_fns, f, id)?;
+    while let Some((id, f)) = todos.fns.pop_front() {
+        convert_fn(state, &mut todos, f, id)?;
+    }
+
+    while let Some(todo) = module_todos.pop_back() {
+        convert_module(state, &mut module_todos, todo)?;
     }
 
     return Ok(start_id);
 }
 
-// fn convert_module<'a>(state: &mut ConvertState<'a>, path: Vec<&'a str>, id: ModuleId) {
-//     let source = read_to_string(path.iter()
-//         .fold(String::new(), |s, p|s.push_str(p)),
-//     );
-// }
+fn convert_module<'a>(state: &mut ConvertState, module_todos: &'a mut VecDeque<TodoModule>, module_todo: TodoModule)->Result<()> {
+    let mut todos = Todos::new(module_todos);
 
-fn convert_exprs<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, RefFn<'a>)>, exprs: Vec<RefExpr<'a>>, is_tail: bool)->Result<()> {
+    let name = state.intern(&module_todo.name);
+
+    let mut path = module_todo.path;
+    path.push(&module_todo.name);
+
+    todos.module_path = path.clone();
+    todos.current_module = module_todo.id;
+
+    let source;
+    if path.is_dir() {
+        path.push("mod.slp");
+        source = read_to_string(&path)?;
+    } else {
+        path.set_extension("slp");
+        source = read_to_string(&path)?;
+    }
+
+    let mut parser = crate::parser::new_parser(&source);
+    let exprs = match parser.parse_all() {
+        Ok(e)=>e,
+        Err(e)=>{
+            error_trace(e, &source, path.display());
+            bail!(ModuleError);
+        },
+    };
+    drop(parser);
+
+    let start_ins = state.next_ins_id();
+    if let Err(e) = convert_exprs(state, &mut todos, exprs, NOT_TAIL) {
+        error_trace(e, &source, path.display());
+        bail!(ModuleError);
+    }
+
+    state.push_module_return();
+
+    while let Some((id, f)) = todos.fns.pop_back() {
+        if let Err(e) = convert_fn(state, &mut todos, f, id) {
+            error_trace(e, &source, path.display());
+            bail!(ModuleError);
+        }
+    }
+
+    let children = todos.new_modules;
+
+    state.modules.insert_reserved(module_todo.id, ModuleNode {
+        name,
+        parent: Some(module_todo.parent),
+        start_ins,
+        children,
+    }).expect("Module already exists!");
+
+    return Ok(());
+}
+
+fn convert_exprs<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, exprs: Vec<RefExpr<'a>>, is_tail: bool)->Result<()> {
     let last = exprs.len() - 1;
     for (i, expr) in exprs.into_iter().enumerate() {
         let expr_is_tail = (i == last) && is_tail;
-        convert_single_expr(state, todo_fns, expr, expr_is_tail)?;
+        convert_single_expr(state, todos, expr, expr_is_tail)?;
     }
 
     return Ok(());
 }
 
-fn convert_single_expr<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, RefFn<'a>)>, expr: RefExpr<'a>, is_tail: bool)->Result<()> {
+fn convert_single_expr<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, expr: RefExpr<'a>, is_tail: bool)->Result<()> {
     Ok(match expr {
         RefExpr::True=>state.bool_true(),
         RefExpr::False=>state.bool_false(),
@@ -580,17 +765,17 @@ fn convert_single_expr<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, R
         RefExpr::Ident(i)=>state.ident(i),
         RefExpr::DotIdent(i)=>state.dot_ident(i),
         RefExpr::Comment(_)=>{},
-        RefExpr::Module(_)=>{
-            state.reserve_module();
-            todo!("Modules");
+        RefExpr::Module(name)=>{
+            let id = state.reserve_module();
+            todos.queue_module(id, name);
         },
         RefExpr::Def{name, data}=>{
-            convert_single_expr(state, todo_fns, *data, is_tail)?;
+            convert_single_expr(state, todos, *data, is_tail)?;
 
             state.define(name);
         },
         RefExpr::Set{name, data}=>{
-            convert_single_expr(state, todo_fns, *data, is_tail)?;
+            convert_single_expr(state, todos, *data, is_tail)?;
 
             state.set_var(name);
         },
@@ -606,7 +791,7 @@ fn convert_single_expr<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, R
                     RefField::Full(i, expr)=>{
                         new_fields.push(state.intern(i));
                         state.start_scope();
-                        convert_single_expr(state, todo_fns, expr, NOT_TAIL)?;
+                        convert_single_expr(state, todos, expr, NOT_TAIL)?;
                         state.end_scope();
                     },
                 }
@@ -616,9 +801,12 @@ fn convert_single_expr<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, R
             state.object(new_fields);
             state.end_scope();
         },
+        RefExpr::Path(path)=>{
+            state.push_path(path);
+        },
         RefExpr::Fn(f)=>{
             let id = state.reserve_func();
-            todo_fns.push((id, f));
+            todos.queue_fn(id, f);
 
             state.function(id);
         },
@@ -636,12 +824,12 @@ fn convert_single_expr<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, R
                     state.instructions.set(id, Instruction::JumpIfFalse(this_id));
                 }
                 
-                convert_single_expr(state, todo_fns, condition, NOT_TAIL)?;
+                convert_single_expr(state, todos, condition, NOT_TAIL)?;
 
                 let id = state.instructions.push(Instruction::Exit);
                 prev_jf = Some(id);
 
-                convert_single_expr(state, todo_fns, body, is_tail)?;
+                convert_single_expr(state, todos, body, is_tail)?;
 
                 if is_tail {
                     state.push_return();
@@ -659,7 +847,7 @@ fn convert_single_expr<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, R
             }
 
             if let Some(default) = default {
-                convert_single_expr(state, todo_fns, *default, is_tail)?;
+                convert_single_expr(state, todos, *default, is_tail)?;
                 if is_tail {
                     state.push_return();
                 }
@@ -678,20 +866,20 @@ fn convert_single_expr<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, R
             }
         },
         RefExpr::Splat(expr)=>{
-            convert_single_expr(state, todo_fns, *expr, NOT_TAIL)?;
+            convert_single_expr(state, todos, *expr, NOT_TAIL)?;
             state.splat();
         },
         RefExpr::Begin(exprs)=>{
             state.start_return_scope();
 
-            convert_exprs(state, todo_fns, exprs, is_tail)?;
+            convert_exprs(state, todos, exprs, is_tail)?;
             
             state.end_scope();
         },
         RefExpr::List(exprs)=>{
             state.start_scope();
 
-            convert_exprs(state, todo_fns, exprs, is_tail)?;
+            convert_exprs(state, todos, exprs, is_tail)?;
 
             if is_tail {
                 state.tail_call_or_list();
@@ -707,9 +895,9 @@ fn convert_single_expr<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, R
     })
 }
 
-fn convert_fn<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, RefFn<'a>)>, func: RefFn<'a>, id: FnId)->Result<()> {
+fn convert_fn<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, func: RefFn<'a>, id: FnId)->Result<()> {
     let name = func.name.map(|n|state.intern(n));
-    let sig = convert_signature(state, todo_fns, func.signature)?;
+    let sig = convert_signature(state, todos, func.signature)?;
     let captures = func.captures
         .map(|c|c.items
             .into_iter()
@@ -727,13 +915,13 @@ fn convert_fn<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, RefFn<'a>)
     return Ok(());
 }
 
-fn convert_signature<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, RefFn<'a>)>, sig: RefFnSignature<'a>)->Result<FnSignature> {
+fn convert_signature<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, sig: RefFnSignature<'a>)->Result<FnSignature> {
     match sig {
         RefFnSignature::Single(params, body)=>{
             let params = convert_vector(state, params);
 
             let body_ptr = state.next_ins_id();
-            convert_exprs(state, todo_fns, body, IS_TAIL)?;
+            convert_exprs(state, todos, body, IS_TAIL)?;
             state.push_return();
 
             return Ok(FnSignature::Single{params, body_ptr});
@@ -748,7 +936,7 @@ fn convert_signature<'a>(state: &mut ConvertState, todo_fns: &mut Vec<(FnId, Ref
                 let params = convert_vector(state, params);
 
                 let body_ptr = state.next_ins_id();
-                convert_exprs(state, todo_fns, body, IS_TAIL)?;
+                convert_exprs(state, todos, body, IS_TAIL)?;
                 state.push_return();
 
                 if params.remainder.is_some() {

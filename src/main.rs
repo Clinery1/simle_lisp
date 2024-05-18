@@ -8,6 +8,7 @@ use clap::{
     Subcommand,
 };
 use std::{
+    fmt::Display,
     time::Instant,
     fs::read_to_string,
 };
@@ -15,9 +16,11 @@ use interpreter::{
     ast::{
         ConvertState,
         InstructionId,
+        ModuleError,
         repl_convert,
         convert,
     },
+    data::Data,
     Interpreter,
 };
 use ast::Expr;
@@ -67,7 +70,10 @@ fn main() {
 
     match args.action {
         Some(Action::Repl)|None=>{          // TODO: Debug and stats for nerds
+            let debug = args.debug;
+
             let mut state = ConvertState::new();
+            state.reserve_module();
             let mut interpreter = Interpreter::new(&mut state);
             let stdin = std::io::stdin();
 
@@ -91,18 +97,34 @@ fn main() {
                 let mut parser = parser::repl_new_parser(source.as_str());
                 let start_id = match parser.parse_all() {
                     Ok(exprs)=>{
+                        drop(parser);
+
+                        if debug >= 1 {
+                            println!("{} root AST nodes", exprs.len());
+                        }
+
+                        if debug >= 2 {
+                            for expr in exprs.iter() {
+                                println!("{expr:#?}");
+                            }
+                        }
+
                         let ret = if exprs.len() == 1 {
                             match match_repl_directive(&exprs) {
                                 Ok(Some(dir))=>match dir {
                                     ReplDirective::Help=>{
                                         print_repl_help();
+                                        source.clear();
                                         continue 'repl;
                                     },
                                     ReplDirective::Exit=>break 'repl,
                                     ReplDirective::Include(name)=>Some(include_file(&mut state, name).unwrap()),
                                 },
                                 Ok(None)=>None,
-                                Err(_)=>continue 'repl,
+                                Err(_)=>{
+                                    source.clear();
+                                    continue 'repl;
+                                },
                             }
                         } else {None};
 
@@ -112,13 +134,16 @@ fn main() {
                             match repl_convert(&mut state, exprs) {
                                 Ok(start_id)=>start_id,
                                 Err(e)=>{
-                                    println!("{e}");
+                                    error_trace(e, &source, "<REPL>");
+                                    source.clear();
                                     continue 'repl;
                                 },
                             }
                         }
                     },
                     Err(e)=>{
+                        drop(parser);
+
                         // if the line looks unfinished, then dont clear it, and don't throw an
                         // error
                         if e.root_cause().downcast_ref::<ReplContinue>().is_some() {
@@ -126,15 +151,22 @@ fn main() {
                         }
 
                         error_trace(e, source.as_str(), "<REPL>");
+                        source.clear();
                         continue 'repl;
                     },
                 };
-                drop(parser);
 
                 // Eval(execute)
                 match interpreter.run(&mut state, Some(start_id)) {
                     // Print
-                    Ok(data)=>println!(">> {data:?}"),
+                    Ok(Some(dr))=>{
+                        let data_ref = dr.get_data();
+                        match &*data_ref {
+                            Data::None=>{},
+                            d=>println!(">> {d:?}"),
+                        }
+                    },
+                    Ok(None)=>{},
                     Err(e)=>error_trace(e, source.as_str(), "<REPL>"),
                 }
 
@@ -284,15 +316,17 @@ fn human_readable_fmt(val: f32)->String {
     }
 }
 
-fn error_trace(err: anyhow::Error, source: &str, filename: &str) {
+pub fn error_trace(err: anyhow::Error, source: &str, file_path: impl Display) {
     let mut chain = err.chain().rev().peekable();
     let Some(root_cause) = chain.next() else {unreachable!("Error has no root cause!")};
 
-    if let Some(serr) = root_cause.downcast_ref::<SimpleError<String>>() {
-        serr.eprint_with_source(source, filename);
+    if let Some(_) = root_cause.downcast_ref::<ModuleError>() {
+        return;
+    } else if let Some(serr) = root_cause.downcast_ref::<SimpleError<String>>() {
+        serr.eprint_with_source(source, file_path);
         println!();
     } else if let Some(serr) = root_cause.downcast_ref::<ReplContinue>() {
-        serr.eprint_with_source(source, filename);
+        serr.eprint_with_source(source, file_path);
         println!();
     } else {
         println!("Error: {root_cause}");
