@@ -20,3 +20,7 @@ For this language, an s-expression language makes certain things easier, like de
 functions. Recursion is also more obvious/intuitive (I think) than in a normal language. With the
 s-expression syntax, recursion can use the special `recur` variable to call the current function,
 but that is just a language feature not a syntax feature.
+
+# Is there a REPL?
+Yes! I just finished it (at the time of writing) and I also made an Asciinema video of it:
+[![asciicast](https://asciinema.org/a/659949.svg)](https://asciinema.org/a/659949)
