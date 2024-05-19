@@ -22,5 +22,9 @@ s-expression syntax, recursion can use the special `recur` variable to call the 
 but that is just a language feature not a syntax feature.
 
 # Is there a REPL?
-Yes! I just finished it (at the time of writing) and I also made an Asciinema video of it:
-[![asciicast](https://asciinema.org/a/659949.svg)](https://asciinema.org/a/659949)
+~Yes! I just finished it (at the time of writing) and I also made an Asciinema video of it:~
+~[![asciicast](https://asciinema.org/a/659949.svg)](https://asciinema.org/a/659949)~
+
+I have since updated the REPL to include tree-sitter syntax highlighting, a better editor, and a
+history buffer
+[![asciicast](https://asciinema.org/a/660067.svg)](https://asciinema.org/a/660067)

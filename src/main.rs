@@ -2,7 +2,6 @@
 
 
 use parser_helper::SimpleError;
-use anyhow::Result;
 use clap::{
     Parser as ArgParser,
     Subcommand,
@@ -14,23 +13,20 @@ use std::{
 };
 use interpreter::{
     ast::{
-        ConvertState,
-        InstructionId,
         ModuleError,
-        repl_convert,
         convert,
     },
-    data::Data,
     Interpreter,
 };
-use ast::Expr;
 use parser::ReplContinue;
+use repl::Repl;
 
 
 mod lexer;
 mod parser;
 mod ast;
 mod interpreter;
+mod repl;
 
 
 #[derive(Clone, Subcommand)]
@@ -40,12 +36,6 @@ enum Action {
         filename: String,
     },
     Repl,
-}
-
-enum ReplDirective<'a> {
-    Exit,
-    Help,
-    Include(&'a str),
 }
 
 
@@ -69,172 +59,12 @@ fn main() {
     let args = Cli::parse();
 
     match args.action {
-        Some(Action::Repl)|None=>{          // TODO: Debug and stats for nerds
-            let debug = args.debug;
-
-            let mut state = ConvertState::new();
-            state.reserve_module();
-            let mut interpreter = Interpreter::new(&mut state);
-            let stdin = std::io::stdin();
-
-            println!("Welcome to the slp REPL!");
-            println!("To exit the repl, press <Ctrl+d> or execute `:exit`");
-
-            let mut source = String::new();
-
-            // Read
-            'repl:loop {
-                if source.is_empty() {
-                    eprint!("> ");
-                } else {
-                    eprint!("...   ");
-                }
-
-                let Ok(n) = stdin.read_line(&mut source) else {break};
-                if n == 0 {break 'repl;}
-
-                // Eval(parse)
-                let mut parser = parser::repl_new_parser(source.as_str());
-                let start_id = match parser.parse_all() {
-                    Ok(exprs)=>{
-                        drop(parser);
-
-                        if debug >= 1 {
-                            println!("{} root AST nodes", exprs.len());
-                        }
-
-                        if debug >= 2 {
-                            for expr in exprs.iter() {
-                                println!("{expr:#?}");
-                            }
-                        }
-
-                        let ret = if exprs.len() == 1 {
-                            match match_repl_directive(&exprs) {
-                                Ok(Some(dir))=>match dir {
-                                    ReplDirective::Help=>{
-                                        print_repl_help();
-                                        source.clear();
-                                        continue 'repl;
-                                    },
-                                    ReplDirective::Exit=>break 'repl,
-                                    ReplDirective::Include(name)=>Some(include_file(&mut state, name).unwrap()),
-                                },
-                                Ok(None)=>None,
-                                Err(_)=>{
-                                    source.clear();
-                                    continue 'repl;
-                                },
-                            }
-                        } else {None};
-
-                        if let Some(out) = ret {
-                            out
-                        } else {
-                            match repl_convert(&mut state, exprs) {
-                                Ok(start_id)=>start_id,
-                                Err(e)=>{
-                                    error_trace(e, &source, "<REPL>");
-                                    source.clear();
-                                    continue 'repl;
-                                },
-                            }
-                        }
-                    },
-                    Err(e)=>{
-                        drop(parser);
-
-                        // if the line looks unfinished, then dont clear it, and don't throw an
-                        // error
-                        if e.root_cause().downcast_ref::<ReplContinue>().is_some() {
-                            continue 'repl;
-                        }
-
-                        error_trace(e, source.as_str(), "<REPL>");
-                        source.clear();
-                        continue 'repl;
-                    },
-                };
-
-                // Eval(execute)
-                match interpreter.run(&mut state, Some(start_id)) {
-                    // Print
-                    Ok(Some(dr))=>{
-                        let data_ref = dr.get_data();
-                        match &*data_ref {
-                            Data::None=>{},
-                            d=>println!(">> {d:?}"),
-                        }
-                    },
-                    Ok(None)=>{},
-                    Err(e)=>error_trace(e, source.as_str(), "<REPL>"),
-                }
-
-                interpreter.gc_collect();
-
-                source.clear();
-
-                // Loop
-            }
+        Some(Action::Repl)|None=>{
+            let mut repl = Repl::new();
+            repl.run(args.debug, args.stats_for_nerds)
         },
         Some(Action::Run{filename})=>run(filename, args.stats_for_nerds, args.debug),
     }
-}
-
-fn print_repl_help() {
-    println!(r#"Help:"#);
-    println!(r#"    :exit               Exits the REPL"#);
-    println!(r#"    (:include "NAME")   Reads and executes the file, then keeps the functions"#);
-}
-
-fn match_repl_directive<'a>(exprs: &'a [Expr<'a>])->Result<Option<ReplDirective<'a>>, ()> {
-    if exprs.len() == 0 {return Ok(None)}
-
-    match &exprs[0] {
-        Expr::List(items)=>{
-            match items.first() {
-                Some(Expr::ReplDirective(s))=>match *s {
-                    "include"=>{
-                        if items.len() != 2 {
-                            println!(":include takes 1 argument");
-                            return Err(());
-                        }
-                        match &items[1] {
-                            Expr::String(s)=>return Ok(Some(ReplDirective::Include(s))),
-                            _=>{
-                                println!(":include only accepts strings");
-                                return Err(());
-                            },
-                        }
-                    }
-                    _=>{
-                        println!("Unknown directive: `{s}`");
-                        return Err(());
-                    },
-                },
-                _=>return Ok(None),
-            }
-        },
-        Expr::ReplDirective(s)=>match *s {
-            "exit"=>return Ok(Some(ReplDirective::Exit)),
-            "help"=>{
-                return Ok(Some(ReplDirective::Help));
-            },
-            _=>{
-                println!("Unknown directive: `{s}`");
-                return Err(());
-            },
-        },
-        _=>return Ok(None),
-    }
-}
-
-fn include_file(state: &mut ConvertState, name: &str)->Result<InstructionId> {
-    let source = read_to_string(name)?;
-    let mut parser = parser::new_parser(source.as_str());
-    let exprs = parser.parse_all()?;
-
-    return repl_convert(state, exprs);
 }
     
 fn run(name: String, stats_for_nerds: bool, debug: u8) {

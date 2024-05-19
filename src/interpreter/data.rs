@@ -384,6 +384,7 @@ impl DataStore {
         return dr;
     }
 
+    /// Active allocations
     pub fn get_alloc_rem(&self)->usize {
         let a = ALLOCATIONS.with(|a|*a.borrow());
         let d = DEALLOCATIONS.with(|d|*d.borrow());

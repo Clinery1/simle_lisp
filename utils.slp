@@ -1,5 +1,5 @@
 (defn print [& args]
-    (std/io/write std/io/stdout (std/io/format ...args))
+    (std/io/write std/io/stdout (std/string/format ...args))
     None)
 
 (defn println

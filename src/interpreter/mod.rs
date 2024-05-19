@@ -249,12 +249,12 @@ pub struct Metrics {
 pub struct Interpreter {
     env_stack: Stack<Env>,
     root_env: Env,
-    data: DataStore,
     recur_ident: Ident,
     vtable_ident: Ident,
     call_stack: CallStack,
     scopes: Scopes,
     var_count: usize,
+    data: DataStore,
     pub metrics: Metrics,
 }
 impl Drop for Interpreter {
@@ -304,6 +304,10 @@ impl Interpreter {
         out.insert_builtins(state);
 
         return out;
+    }
+
+    pub fn get_data_store(&self)->&DataStore {
+        &self.data
     }
 
     fn insert_builtins(&mut self, state: &mut ConvertState) {

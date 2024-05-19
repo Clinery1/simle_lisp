@@ -9,8 +9,15 @@ edition = "2021"
 anyhow = "1.0.82"
 bitvec = "1.0.1"
 clap = { version = "4.5.4", features = ["derive"] }
+crossterm = "0.27.0"
 fnv = "1.0.7"
 indexmap = "2.2.6"
 logos = "0.14.0"
 misc_utils = { git = "https://github.com/Clinery1/misc_utils.git", version = "0.4.0" }
 parser_helper = { git = "https://github.com/Clinery1/parser_helper.git", version = "0.4.0", features = ["logos"] }
+ropey = "1.6.1"
+tree-sitter = "0.22.6"
+tree-sitter-simplelisp = { git = "https://github.com/Clinery1/simple_lisp-tree-sitter.git", version = "0.0.1" }
+
+[build-dependencies]
+cc="*"
