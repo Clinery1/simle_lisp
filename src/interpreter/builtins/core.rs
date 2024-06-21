@@ -77,7 +77,7 @@ pub fn index(mut args: Vec<DataRef>, _: &mut Interpreter, _: &mut Interner)->Res
 }
 
 pub fn list(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
-    Ok(i.alloc(Data::List(args)))
+    Ok(i.alloc(Data::List(args.into())))
 }
 
 pub fn clone(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {

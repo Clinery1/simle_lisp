@@ -3,12 +3,15 @@
 
 
 (defn print [& args]
-    (std/io/write std/io/stdout (std/io/format ...args))
+    ; Temporarily disable printing so we can profile the code itself.
+    ; (std/io/write std/io/stdout (std/string/format ...args))
     None)
 
 (defn println
     ([& args] (print ...args "\n"))
     ([] (print "\n")))
+
+; (def and core/and)
 
 
 
@@ -22,22 +25,41 @@
 ;             ((< i max) (recur max (+ 1 i) prev2 (+ prev1 prev2)))
 ;             (else prev1))))
 
-; (defn fizzBuzz
-;     ([max] (recur max 1))
-;     ([max i]
-;         (def three (= 0 (% i 3)))
-;         (def five (= 0 (% i 5)))
-;         (cond
-;             ((<= i max) (begin
-;                 (cond
-;                     ((and three five) (println "FizzBuzz"))
-;                     (three (println "Fizz"))
-;                     (five (println "Buzz"))
-;                     (else (println i)))
-;                 (recur max (+ 1 i)))))))
 
+(defn fizzBuzz
+    ([max] (recur max 1))
+    ([max i]
+        (def three (= 0 (% i 3)))
+        (def five (= 0 (% i 5)))
+        (cond
+            ((<= i max) (begin
+                (cond
+                    ((core/and three five) (println "FizzBuzz"))
+                    (three (println "Fizz"))
+                    (five (println "Buzz"))
+                    (else (println i)))
+                (recur max (+ 1 i)))))))
 
-; (fizzBuzz 30)
+(defn if
+    ([condition lambda otherwise]
+        (cond
+            (condition (lambda))
+            (else (otherwise))))
+    ([condition lambda]
+        (cond
+            (condition (lambda)))))
+
+(defn doNTimes
+    ([count func] (recur count func 0))
+    ([count func i]
+        (if (< i count) (fn {count func i} []
+            (if (= 0 (% i 10)) core/gcCollect)  ; default 10
+            (func)
+            (doNTimes count func (+ 1 i))))))
+
+(doNTimes
+    40_000
+    (fn [] (fizzBuzz 50)))
 ; (println (fib 19))
 
 
@@ -58,174 +80,174 @@
 ; (println (anotherCounter))
 ; (println (anotherCounter))
 
-(defn listIter [iterList]
-    (def i 0)
-    (fn {iterList i} []
-        (cond
-            ((< i (core/length iterList))
-                (begin
-                    (def idx (core/clone i))
-                    (+= i 1)
-                    (core/index iterList idx)))
-            (else None))))
-(defn revListIter [iterList]
-    (fn {iterList} []
-        (core/listPop iterList)))
+; (defn listIter [iterList]
+;     (def i 0)
+;     (fn {iterList i} []
+;         (cond
+;             ((< i (core/length iterList))
+;                 (begin
+;                     (def idx (core/clone i))
+;                     (+= i 1)
+;                     (core/index iterList idx)))
+;             (else None))))
+; (defn revListIter [iterList]
+;     (fn {iterList} []
+;         (core/listPop iterList)))
 
-(defn range [start end]
-    (def i start)
-    (fn {i end} []
-        (cond
-            ((< i end)
-                (begin
-                    (def ret (core/clone i))
-                    (+= i 1)
-                    ret))
-            (else None))))
-(defn rangeInclusive [start endInclusive]
-    (def i start)
-    (fn {i endInclusive} []
-        (cond
-            ((<= i endInclusive) (begin
-                (def ret (core/clone i))
-                (+= i 1)
-                ret))
-            (else None))))
+; (defn range [start end]
+;     (def i start)
+;     (fn {i end} []
+;         (cond
+;             ((< i end)
+;                 (begin
+;                     (def ret (core/clone i))
+;                     (+= i 1)
+;                     ret))
+;             (else None))))
+; (defn rangeInclusive [start endInclusive]
+;     (def i start)
+;     (fn {i endInclusive} []
+;         (cond
+;             ((<= i endInclusive) (begin
+;                 (def ret (core/clone i))
+;                 (+= i 1)
+;                 ret))
+;             (else None))))
 
-(defn forEach [iter func]
-    (def val (iter))
-    (cond
-        ((!= val None) (begin
-            (func val)
-            (recur iter func)))
-        (else None)))
+; (defn forEach [iter func]
+;     (def val (iter))
+;     (cond
+;         ((!= val None) (begin
+;             (func val)
+;             (recur iter func)))
+;         (else None)))
 
-(defn map [iter mapFn]
-    (fn {iter mapFn} []
-        (def val (iter))
-        (cond
-            ((= val None) None)
-            (else (mapFn val)))))
-(defn filter [iter filterFn]
-    (fn {iter filterFn} []
-        (def val (iter))
-        (cond
-            ((= val None) None)
-            (else (cond
-                ((filterFn val) val)
-                (else (recur)))))))
+; (defn map [iter mapFn]
+;     (fn {iter mapFn} []
+;         (def val (iter))
+;         (cond
+;             ((= val None) None)
+;             (else (mapFn val)))))
+; (defn filter [iter filterFn]
+;     (fn {iter filterFn} []
+;         (def val (iter))
+;         (cond
+;             ((= val None) None)
+;             (else (cond
+;                 ((filterFn val) val)
+;                 (else (recur)))))))
 
-(defn enumerate [iter]
-    (def i 0)
-    (fn {iter i} []
-        (def val (iter))
-        (cond
-            ((= val None) None)
-            (else (begin
-                (def out (core/list (core/clone i) val))
-                (+= i 1)
-                out)))))
+; (defn enumerate [iter]
+;     (def i 0)
+;     (fn {iter i} []
+;         (def val (iter))
+;         (cond
+;             ((= val None) None)
+;             (else (begin
+;                 (def out (core/list (core/clone i) val))
+;                 (+= i 1)
+;                 out)))))
 
-(defn reduce [iter reduceFn]
-    (def out (iter))
-    (def rec (fn [iter reduceFn out]
-        (def next (iter))
-        (cond
-            ((= next None) out)
-            (else (begin
-                (def out (reduceFn out next))
-                (recur iter reduceFn out))))))
-    (cond
-        ((= out None) None)
-        (else (rec iter reduceFn out))))
+; (defn reduce [iter reduceFn]
+;     (def out (iter))
+;     (def rec (fn [iter reduceFn out]
+;         (def next (iter))
+;         (cond
+;             ((= next None) out)
+;             (else (begin
+;                 (def out (reduceFn out next))
+;                 (recur iter reduceFn out))))))
+;     (cond
+;         ((= out None) None)
+;         (else (rec iter reduceFn out))))
 
-(defn sum [iter]
-    (reduce iter +))
+; (defn sum [iter]
+;     (reduce iter +))
 
-(defn addOne [iter]
-    (map iter (fn [i] (+ 1 i))))
+; (defn addOne [iter]
+;     (map iter (fn [i] (+ 1 i))))
 
-(defn fold [iter start foldFn]
-    (def rec (fn [iter start foldFn]
-        (def next (iter))
-        (cond
-            ((= next None) start)
-            (else (begin
-                (def start (foldFn start next))
-                (recur iter start foldFn))))))
-    (rec iter start foldFn))
+; (defn fold [iter start foldFn]
+;     (def rec (fn [iter start foldFn]
+;         (def next (iter))
+;         (cond
+;             ((= next None) start)
+;             (else (begin
+;                 (def start (foldFn start next))
+;                 (recur iter start foldFn))))))
+;     (rec iter start foldFn))
 
-(defn collectList [iter]
-    (fold
-        iter
-        (core/list)
-        (fn [collection item] (+ collection item))))
-
-
-(defn iterFizzBuzz [max]
-    (forEach
-        (rangeInclusive 1 max)
-        (fn [i]
-            (def three (= 0 (% i 3)))
-            (def five (= 0 (% i 5)))
-            (cond
-                ((and three five) (println "FizzBuzz"))
-                (three (println "Fizz"))
-                (five (println "Buzz"))
-                (else (println i))))))
+; (defn collectList [iter]
+;     (fold
+;         iter
+;         (core/list)
+;         (fn [collection item] (+ collection item))))
 
 
-(defn newDynList []
-    (object
-        (.$ (object
-            (.len (fn [obj]
-                (obj .__length)))
-            (.push (fn [obj item]
-                (+= (obj .inner) item)
-                (+= (obj .__length) 1)))
-            (.pop (fn [obj]
-                (-= (obj .__length) 1)
-                (core/listPop (obj .inner))))
-            (.index (fn [obj idx]
-                (core/index (obj .inner) idx)))))
-        (.inner (core/list))
-        (.__length 0)))
+; (defn iterFizzBuzz [max]
+;     (forEach
+;         (rangeInclusive 1 max)
+;         (fn [i]
+;             (def three (= 0 (% i 3)))
+;             (def five (= 0 (% i 5)))
+;             (cond
+;                 ((and three five) (println "FizzBuzz"))
+;                 (three (println "Fizz"))
+;                 (five (println "Buzz"))
+;                 (else (println i))))))
 
-(defn char2num [char]
-    (cond
-        ((= char \0) 0)
-        ((= char \1) 1)
-        ((= char \2) 2)
-        ((= char \3) 3)
-        ((= char \4) 4)
-        ((= char \5) 5)
-        ((= char \6) 6)
-        ((= char \7) 7)
-        ((= char \8) 8)
-        ((= char \9) 9)
-        (else None)))
 
-(defn str2num [str]
-    (def foldStart (object
-        (.out 0)
-        (.mul 1)
-        (.valid #t)))
+; (defn newDynList []
+;     (object
+;         (.$ (object
+;             (.len (fn [obj]
+;                 (obj .__length)))
+;             (.push (fn [obj item]
+;                 (+= (obj .inner) item)
+;                 (+= (obj .__length) 1)))
+;             (.pop (fn [obj]
+;                 (-= (obj .__length) 1)
+;                 (core/listPop (obj .inner))))
+;             (.index (fn [obj idx]
+;                 (core/index (obj .inner) idx)))))
+;         (.inner (core/list))
+;         (.__length 0)))
 
-    (def foldEnd (fold (revListIter (chars str)) foldStart
-        (fn [out char]
-            (def num (cond
-                ((= char \_) \_)
-                (else (char2num char))))
-            (cond
-                ((= num \_) None)
-                ((= num None) (out .valid #f))
-                (else (begin
-                    (out .out (+ (out .out) (* num (out .mul))))
-                    (out .mul (* (out .mul) 10)))))
-            out)))
-    (cond
-        ((foldEnd .valid) (foldEnd .out))
-        (else None)))
+; (defn char2num [char]
+;     (cond
+;         ((= char \0) 0)
+;         ((= char \1) 1)
+;         ((= char \2) 2)
+;         ((= char \3) 3)
+;         ((= char \4) 4)
+;         ((= char \5) 5)
+;         ((= char \6) 6)
+;         ((= char \7) 7)
+;         ((= char \8) 8)
+;         ((= char \9) 9)
+;         (else None)))
+
+; (defn str2num [str]
+;     (def foldStart (object
+;         (.out 0)
+;         (.mul 1)
+;         (.valid #t)))
+
+;     (def foldEnd (fold (revListIter (chars str)) foldStart
+;         (fn [out char]
+;             (def num (cond
+;                 ((= char \_) \_)
+;                 (else (char2num char))))
+;             (cond
+;                 ((= num \_) None)
+;                 ((= num None) (out .valid #f))
+;                 (else (begin
+;                     (out .out (+ (out .out) (* num (out .mul))))
+;                     (out .mul (* (out .mul) 10)))))
+;             out)))
+;     (cond
+;         ((foldEnd .valid) (foldEnd .out))
+;         (else None)))
 
 
 ; (def myList (newDynList))
@@ -258,10 +280,10 @@
 ; (print myData)
 
 ; (iterFizzBuzz 30)
-(def num (str2num "1234"))
+; (def num (str2num "1234"))
 
-(println num)
-(println (= num 1234))
+; (println num)
+; (println (= num 1234))
 
 
 ; (println (sum (range 0 10)))

@@ -1,10 +1,17 @@
-use fnv::FnvHasher;
+use rustc_hash::FxHasher;
 use bitvec::prelude::*;
-use std::hash::Hasher;
+use std::{
+    hash::{
+        Hasher,
+        Hash,
+    },
+    rc::Rc,
+};
+use super::Ident;
 
 
 const KEY_COUNT: usize = 64;
-const KEYS: [u64; KEY_COUNT] = [
+const KEYS: [u64; KEY_COUNT] = [    // Guaranteed to be *TRULY RANDOM*
     13643905789993782733,
     17601087771595538926,
     18344616034990649216,
@@ -87,9 +94,9 @@ const KEYS: [u64; KEY_COUNT] = [
 /// With this internal representation, we can store the same amount of data in a smaller footprint.
 /// Tests have shown ~480 bytes for 1000 keys and ~3.0 gamma. It takes max 110us to calculate the
 /// function, and max of 500ns to "hash" some data. My machine is a Ryzen 7 7840HS in a Framework 16.
-struct MinimalPerfectHasher<const MAP_BITS: usize> {
+pub struct MinimalPerfectHasher<const MAP_BITS: usize> {
     inner: BitVec,
-    keys: Vec<usize>,
+    keys: Vec<Ident>,
 }
 impl<const MAP_BITS: usize> MinimalPerfectHasher<MAP_BITS> {
     const DEFAULT_GAMMA: f64 = 5.0;
@@ -97,7 +104,7 @@ impl<const MAP_BITS: usize> MinimalPerfectHasher<MAP_BITS> {
     const BITMAP_SIZE_BITS: usize = MAP_BITS;
     
 
-    fn new(set: &[usize], gamma: Option<f64>)->Self {
+    pub fn new(set: &[Ident], gamma: Option<f64>)->Self {
         let mut keys = Vec::new();
         let gamma = gamma.unwrap_or(Self::DEFAULT_GAMMA);
         let mut out_rows: Vec<BitVec> = Vec::new();
@@ -159,7 +166,7 @@ impl<const MAP_BITS: usize> MinimalPerfectHasher<MAP_BITS> {
     }
 
     /// Assumes the value is part of the creation set
-    fn get_index(&self, d: usize)->Option<usize> {
+    pub fn get_index(&self, d: Ident)->Option<usize> {
         let mut start_idx = 0;
         let mut out = 0;
         let mut key_iter = KEYS.iter().enumerate();
@@ -189,13 +196,62 @@ impl<const MAP_BITS: usize> MinimalPerfectHasher<MAP_BITS> {
         return None;
     }
 
-    fn size(&self)->usize {
-        (self.inner.len() / 8) + 8 + (self.keys.len() * 8)
+    #[inline]
+    pub fn key_count(&self)->usize {
+        self.keys.len()
+    }
+}
+
+pub struct PerfectHashMap<T> {
+    hasher: Rc<MinimalPerfectHasher<8>>,
+    map: Vec<Option<T>>,
+}
+impl<T> PerfectHashMap<T> {
+    pub fn new(set: &[Ident])->Self {
+        let hasher = Rc::new(MinimalPerfectHasher::new(set, None));
+
+        Self::from_hasher(hasher)
+    }
+
+    pub fn from_hasher(hasher: Rc<MinimalPerfectHasher<8>>)->Self {
+        let mut map = Vec::new();
+        map.reserve_exact(hasher.key_count());
+        map.extend((0..hasher.key_count()).map(|_|None));
+
+        Self {
+            hasher,
+            map,
+        }
+    }
+
+    #[inline]
+    pub fn hasher(&self)->Rc<MinimalPerfectHasher<8>> {
+        self.hasher.clone()
+    }
+
+    pub fn get(&self, i: Ident)->Option<&T> {
+        let idx = self.hasher.get_index(i)?;
+        self.map[idx].as_ref()
+    }
+
+    pub fn get_mut(&mut self, i: Ident)->Option<&mut T> {
+        let idx = self.hasher.get_index(i)?;
+        self.map[idx].as_mut()
+    }
+
+    pub fn insert(&mut self, i: Ident, data: T)->Option<T> {
+        let idx = self.hasher.get_index(i)?;
+        self.map[idx].replace(data)
+    }
+
+    pub fn remove(&mut self, i: Ident)->Option<T> {
+        let idx = self.hasher.get_index(i)?;
+        self.map[idx].take()
     }
 }
 
 
-fn index(key: u64, val: usize, depth: usize, len: usize)->usize {
+fn index(key: u64, val: Ident, depth: usize, len: usize)->usize {
     let hash = hash(key, val);
     let upper = (hash >> 32) as u32;
     let mut lower = (hash & (u32::MAX as u64)) as u32;
@@ -204,8 +260,8 @@ fn index(key: u64, val: usize, depth: usize, len: usize)->usize {
     return (((upper as usize) << 32) | lower as usize) % len;
 }
 
-fn hash(key: u64, val: usize)->u64 {
-    let mut hasher = FnvHasher::with_key(key);
-    hasher.write_usize(val);
+fn hash(key: u64, val: Ident)->u64 {
+    let mut hasher = FxHasher::with_seed(key as usize);
+    val.hash(&mut hasher);
     return hasher.finish();
 }

@@ -121,6 +121,7 @@ fn run(name: String, stats_for_nerds: bool, debug: u8) {
                         println!("Allocations: {}", interpreter.metrics.allocations);
                         println!("Max call stack depth: {}", interpreter.metrics.max_call_stack_depth);
                         println!("Instruction count: {}", interpreter.metrics.instructions_executed);
+                        println!("Max bytes allocated at once: {}", interpreter.metrics.max_allocation_bytes);
                         println!("Runtime: {:?}", interpreter.metrics.total_run_time);
                         let rt = interpreter.metrics.total_run_time.as_secs_f32();
                         let ins_per_sec = interpreter.metrics.instructions_executed as f32 / rt;

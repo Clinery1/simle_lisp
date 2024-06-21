@@ -1,3 +1,4 @@
+use rustc_hash::FxBuildHasher;
 use anyhow::{
     Result,
     Error,
@@ -11,7 +12,6 @@ use indexmap::{
     IndexSet,
     IndexMap,
 };
-use fnv::FnvBuildHasher;
 use std::{
     hash::{
         Hasher,
@@ -39,6 +39,7 @@ use crate::{
     },
     error_trace,
 };
+use super::IdentSet;
 
 
 const IS_TAIL: bool = true;
@@ -103,9 +104,9 @@ pub enum FnSignature {
         body_ptr: InstructionId,
     },
     Multi {
-        exact: IndexMap<usize, (Vector, InstructionId), FnvBuildHasher>,
+        exact: IndexMap<usize, (Vector, InstructionId), FxBuildHasher>,
         max_exact: usize,
-        at_least: IndexMap<usize, (Vector, InstructionId), FnvBuildHasher>,
+        at_least: IndexMap<usize, (Vector, InstructionId), FxBuildHasher>,
         any: Option<(Vector, InstructionId)>,
     },
 }
@@ -205,7 +206,7 @@ pub struct Fn {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Ident(usize);
+pub struct Ident(pub usize);
 impl Hash for Ident {
     fn hash<H: Hasher>(&self, hasher: &mut H) {
         hasher.write_usize(self.0);
@@ -235,7 +236,7 @@ pub struct InstructionStore {
 
     /// A list of instruction indices describing the order that they execute. Things CAN be removed
     /// from here.
-    ins_order: IndexSet<InstructionId, FnvBuildHasher>,
+    ins_order: IndexSet<InstructionId, FxBuildHasher>,
 }
 #[allow(dead_code)]
 impl InstructionStore {
@@ -368,6 +369,8 @@ pub struct ConvertState {
     pub warnings: Vec<Error>,
     pub instructions: InstructionStore,
     pub modules: ModuleTree,
+    scope_start: Option<usize>,
+    names_in_scope: IdentSet,
 }
 #[allow(dead_code)]
 impl ConvertState {
@@ -378,6 +381,8 @@ impl ConvertState {
             warnings: Vec::new(),
             instructions: InstructionStore::new(),
             modules: ModuleTree::new(),
+            scope_start: None,
+            names_in_scope: IdentSet::default(),
         }
     }
     #[inline]
@@ -539,9 +544,12 @@ impl ConvertState {
     pub fn reserve_module(&mut self)->ModuleId {
         let m = self.modules.reserve_slot();
 
-        self.instructions.push(Instruction::Module(m));
-
         return m;
+    }
+
+    #[inline]
+    pub fn module(&mut self, id: ModuleId) {
+        self.instructions.push(Instruction::Module(id));
     }
 
     #[inline]
@@ -767,6 +775,7 @@ fn convert_single_expr<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, '
         RefExpr::Comment(_)=>{},
         RefExpr::Module(name)=>{
             let id = state.reserve_module();
+            state.module(id);
             todos.queue_module(id, name);
         },
         RefExpr::Def{name, data}=>{

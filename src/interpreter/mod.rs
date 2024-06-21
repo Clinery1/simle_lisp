@@ -1,9 +1,9 @@
+use rustc_hash::FxBuildHasher;
 use anyhow::{
     // Context,
     Result,
     bail,
 };
-use fnv::FnvBuildHasher;
 use misc_utils::Stack;
 use std::{
     time::{
@@ -30,6 +30,7 @@ pub mod ast;
 mod builtins;
 pub mod data;
 // mod new_data;
+// mod perfect_hasher;
 
 
 pub type CallStack = Stack<(InstructionId, Scopes)>;
@@ -37,14 +38,14 @@ pub type Scopes = Stack<ScopeItem>;
 
 pub type NativeFn = fn(Vec<DataRef>, &mut Interpreter, &mut Interner)->Result<DataRef>;
 
-pub type IdentMap<T> = HashMap<Ident, T, FnvBuildHasher>;
-pub type IdentSet = HashSet<Ident, FnvBuildHasher>;
+pub type IdentMap<T> = HashMap<Ident, T, FxBuildHasher>;
+pub type IdentSet = HashSet<Ident, FxBuildHasher>;
 
-// pub type FnIdMap<T> = HashMap<FnId, T, FnvBuildHasher<Ident>>;
-// pub type FnIdSet = HashSet<FnId, FnvBuildHasher<Ident>>;
+// pub type FnIdMap<T> = HashMap<FnId, T, FxBuildHasher<Ident>>;
+// pub type FnIdSet = HashSet<FnId, FxBuildHasher<Ident>>;
 
-// pub type InsIdMap<T> = HashMap<InstructionId, T, FnvBuildHasher<Ident>>;
-// pub type InsIdSet = HashSet<InstructionId, FnvBuildHasher<Ident>>;
+// pub type InsIdMap<T> = HashMap<InstructionId, T, FxBuildHasher<Ident>>;
+// pub type InsIdSet = HashSet<InstructionId, FxBuildHasher<Ident>>;
 
 
 const DEBUG: bool = false;
@@ -123,8 +124,11 @@ impl Default for Env {
 impl Env {
     #[inline]
     pub fn new()->Self {
+        let mut vars = IdentMap::default();
+        vars.reserve(16);
+
         Env {
-            vars: IdentMap::default(),
+            vars,
             scopes: Stack::new(),
         }
     }
@@ -135,6 +139,7 @@ impl Env {
         }
 
         let mut out = IdentMap::default();
+        out.reserve(self.vars.capacity());
         for (i, mut scope) in self.vars.drain() {
             if scope.len() == 1 {
                 out.insert(i, scope.pop().unwrap().inner());
@@ -149,6 +154,7 @@ impl Env {
     pub fn clear(&mut self)->usize {
         let mut count = 0;
         self.scopes.clear();
+
         // retain the storage, but not the data. Try to avoid unnecessary allocations
         for (_, scope) in self.vars.iter_mut() {
             count += scope.len();
@@ -222,7 +228,12 @@ impl Env {
     }
 
     pub fn get(&self, name: Ident)->Option<DataRef> {
-        Some((*self.vars.get(&name)?[0]).clone())
+        let values = self.vars.get(&name)?;
+        if values.len() == 0 {
+            panic!("No values for var {name:?}");
+        }
+
+        Some((*values[0]).clone())
     }
 }
 impl Drop for Env {
@@ -244,10 +255,12 @@ pub struct Metrics {
     pub total_run_time: Duration,
     pub last_run_time: Duration,
     pub allocations: u64,
+    pub max_allocation_bytes: u64,
 }
 
 pub struct Interpreter {
     env_stack: Stack<Env>,
+    old_envs: Stack<Env>,
     root_env: Env,
     recur_ident: Ident,
     vtable_ident: Ident,
@@ -293,6 +306,7 @@ impl Interpreter {
             var_count: root_env.var_count(),
             root_env,
             env_stack: Stack::new(),
+            old_envs: Stack::new(),
             data,
             recur_ident: state.interner.intern("recur"),
             vtable_ident: state.interner.intern("$"),
@@ -374,17 +388,22 @@ impl Interpreter {
     }
 
     pub fn gc_collect(&mut self)->usize {
+        let allocation_bytes = self.data.get_alloc_rem() as u64;
+        self.metrics.max_allocation_bytes = self.metrics.max_allocation_bytes.max(allocation_bytes);
+
         self.data.collect(&self.call_stack, &self.scopes)
     }
 
     pub fn push_env(&mut self) {
-        self.env_stack.push(Env::new());
+        let env = self.old_envs.pop().unwrap_or_else(Env::new);
+        self.env_stack.push(env);
     }
 
     #[inline]
     pub fn pop_env(&mut self) {
-        let env = self.env_stack.pop().unwrap();
-        self.var_count -= env.var_count();
+        let mut env = self.env_stack.pop().unwrap();
+        self.var_count -= env.clear();
+        self.old_envs.push(env);
     }
 
     pub fn clear_env(&mut self) {
@@ -506,7 +525,28 @@ impl Interpreter {
     // TODO: Make `DataStore` aware of the data in `scopes` and `call_stack` before we do a GC and
     // cause a use-after-free bug
     pub fn run(&mut self, state: &mut ConvertState, start_id: Option<InstructionId>)->Result<Option<DataRef>> {
-        const MAX_ITERS: usize = 10000;
+        use Instruction as I;
+        // dbg!(&state.interner);
+        // for (i, ins) in state.instructions.iter().enumerate() {
+        //     print!("{:>4} ", i);
+        //     match ins {
+        //         I::Exit=>println!("Exit\n"),
+        //         I::Return=>println!("Return\n"),
+        //         I::Var(name)=>println!("Var({})", state.interner.get(*name)),
+        //         I::Define(name)=>println!("Define({})", state.interner.get(*name)),
+        //         I::Set(name)=>println!("Set({})", state.interner.get(*name)),
+        //         I::Path(path)=>{
+        //             print!("{}", state.interner.get(path[0]));
+        //             for segment in path.iter().skip(1).copied() {
+        //                 print!("/{}", state.interner.get(segment));
+        //             }
+        //             println!();
+        //         },
+        //         _=>println!("{ins:?}"),
+        //     }
+        // }
+
+        const MAX_ITERS: u64 = 1_000_000_000;
 
         let start = Instant::now();
 
@@ -521,8 +561,6 @@ impl Interpreter {
         let mut ins_count = 0;
 
         while let Some(ins) = iter.next() {
-            use Instruction as I;
-
             // println!("  > {:?}", ins);
 
             // if ins_count % 50 == 0 && ins_count > 0 {
@@ -649,6 +687,7 @@ impl Interpreter {
                 I::Call=>{
                     let mut args = self.scopes.pop().unwrap().list();
                     let mut arg0 = args[0].clone();
+                    let arg0_func = arg0.clone();
                     let data = arg0.get_data();
                     let mut has_func = true;
 
@@ -728,7 +767,7 @@ impl Interpreter {
                                 self.push_env_scope();
 
                                 if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
-                                    self.set_func_args(*id, params, args, &state.interner)?;
+                                    self.set_func_args(arg0_func, params, args, &state.interner)?;
 
                                     iter.jump(body_ptr);
                                 } else {
@@ -761,7 +800,7 @@ impl Interpreter {
                                 self.push_env_scope();
 
                                 if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
-                                    self.set_func_args(*id, params, args, &state.interner)?;
+                                    self.set_func_args(arg0_func, params, args, &state.interner)?;
 
                                     iter.jump(body_ptr);
                                 } else {
@@ -782,6 +821,7 @@ impl Interpreter {
                 I::TailCall=>{
                     let mut args = self.scopes.pop().unwrap().list();
                     let mut arg0 = args[0].clone();
+                    let arg0_func = arg0.clone();
                     let data = arg0.get_data();
                     let mut has_func = true;
 
@@ -841,7 +881,7 @@ impl Interpreter {
 
                                 if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
                                     // println!("Calling function with params: {params:?}");
-                                    self.set_func_args(*id, params, args, &state.interner)?;
+                                    self.set_func_args(arg0_func, params, args, &state.interner)?;
 
                                     iter.jump(body_ptr);
                                     // dbg!(iter.peek());
@@ -870,7 +910,7 @@ impl Interpreter {
                                 self.push_env_scope();
 
                                 if let Some((params, body_ptr)) = func.sig.match_arg_count(args.len()) {
-                                    self.set_func_args(*id, params, args, &state.interner)?;
+                                    self.set_func_args(arg0_func, params, args, &state.interner)?;
 
                                     iter.jump(body_ptr);
                                 } else {
@@ -958,6 +998,9 @@ impl Interpreter {
         self.metrics.last_run_time = duration;
         self.metrics.total_run_time += duration;
 
+        let allocation_bytes = self.data.get_alloc_rem() as u64;
+        self.metrics.max_allocation_bytes = self.metrics.max_allocation_bytes.max(allocation_bytes);
+
         self.data.collect(&self.call_stack, &self.scopes);
 
         return Ok(self.pop_from_scope());
@@ -971,11 +1014,10 @@ impl Interpreter {
             .unwrap()
     }
 
-    fn set_func_args(&mut self, id: FnId, params: &Vector, args: Vec<DataRef>, interner: &Interner)->Result<()> {
+    fn set_func_args(&mut self, func: DataRef, params: &Vector, args: Vec<DataRef>, interner: &Interner)->Result<()> {
         let mut args_iter = args.into_iter();
 
-        let dr = self.alloc(Data::Fn(id));
-        self.define_var(self.recur_ident, dr, interner).unwrap();
+        self.define_var(self.recur_ident, func, interner).unwrap();
 
         // set the params
         for (param, data) in params.items.iter().zip(&mut args_iter) {
@@ -987,7 +1029,10 @@ impl Interpreter {
             let data = Data::List(args_iter.collect());
             let dr = self.alloc(data);
             self.define_var(rem, dr, interner)?;
+        } else {
+            assert!(args_iter.len() == 0);
         }
+
 
         return Ok(());
     }

@@ -16,6 +16,7 @@ logos = "0.14.0"
 misc_utils = { git = "https://github.com/Clinery1/misc_utils.git", version = "0.4.0" }
 parser_helper = { git = "https://github.com/Clinery1/parser_helper.git", version = "0.4.0", features = ["logos"] }
 ropey = "1.6.1"
+rustc-hash = "2.0.0"
 tree-sitter = "0.22.6"
 tree-sitter-simplelisp = { git = "https://github.com/Clinery1/simple_lisp-tree-sitter.git", version = "0.0.1" }
 

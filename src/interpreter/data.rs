@@ -1,5 +1,5 @@
+use rustc_hash::FxBuildHasher;
 use indexmap::IndexSet;
-use fnv::FnvBuildHasher;
 use std::{
     cell::{
         RefCell,
@@ -39,7 +39,7 @@ use super::{
 };
 
 
-type DataRefSet = IndexSet<HashableDataRef, FnvBuildHasher>;
+type DataRefSet = IndexSet<HashableDataRef, FxBuildHasher>;
 
 
 thread_local!(
@@ -175,9 +175,16 @@ impl Deref for ExternalData {
 /// A shared reference to some `Data`. The data can be mutably borrowed, but it panics if the data
 /// is already borrowed either mutably or shared (does not include other copies of `DataRef`, but
 /// the internal `Data`).
-#[derive(Clone)]
 pub struct DataRef {
     inner: NonNull<DataBox>,
+}
+impl Clone for DataRef {
+    #[inline(always)]
+    fn clone(&self)->Self {
+        DataRef {
+            inner: self.inner,
+        }
+    }
 }
 impl Debug for DataRef {
     fn fmt(&self, f: &mut Formatter)->FmtResult {
@@ -198,30 +205,32 @@ impl PartialEq for DataRef {
 }
 #[allow(dead_code)]
 impl DataRef {
-    fn new(db: DataBox)->Self {
-        use std::{
-            alloc::{Layout, alloc},
-            mem::MaybeUninit,
-        };
+    fn new(data: Data)->Self {
+        use std::alloc::{Layout, alloc};
 
         // println!("Create layout");
         let layout = Layout::new::<DataBox>();
 
         // println!("Raw ptr");
-        let raw_ptr = unsafe {alloc(layout) as *mut MaybeUninit<DataBox>};
+        let raw_ptr = unsafe {alloc(layout) as *mut DataBox};
         // println!("NonNull ptr");
-        let mut ptr = NonNull::new(raw_ptr).expect("Allocation failed");
+        let ptr = NonNull::new(raw_ptr).expect("Allocation failed");
 
         // println!("Unsafe set data at ptr");
         unsafe {
-            ptr.as_mut().write(db);
+            std::ptr::write(raw_ptr, DataBox {
+                inner: RefCell::new(data),
+                pinned: Cell::new(false),
+                external: RefCell::new(0),
+                generation: Cell::new(0),
+            });
         }
 
         ALLOCATIONS.with_borrow_mut(|a|*a += 1);
 
         // println!("Return");
         return DataRef {
-            inner: ptr.cast(),
+            inner: ptr,
         };
     }
 
@@ -307,10 +316,13 @@ impl DataRef {
     unsafe fn dealloc(self) {
         use std::alloc::{Layout, dealloc};
 
-        let ptr = self.inner.as_ptr() as *mut u8;
+        let ptr = self.inner.as_ptr();
+        ptr.drop_in_place();
+
+        let raw_ptr = ptr as *mut u8;
         let layout = Layout::new::<DataBox>();
 
-        dealloc(ptr, layout);
+        dealloc(raw_ptr, layout);
     }
 
     /// SAFETY: This is a garbage collected value, so unless we have a bug in the GC, we don't
@@ -339,23 +351,11 @@ impl Clone for DataBox {
     }
 }
 impl DataBox {
-    pub fn new(data: Data)->Self {
-        DataBox {
-            inner: RefCell::new(data),
-            pinned: Cell::new(false),
-            external: RefCell::new(0),
-            generation: Cell::new(0),
-        }
-    }
-
     pub fn allocation_size(&self)->usize {
         let data_alloc_size = self.inner.borrow().allocation_size();
 
         return mem::size_of::<Self>() + data_alloc_size;
     }
-}
-impl From<Data> for DataBox {
-    fn from(d: Data)->Self {Self::new(d)}
 }
 
 /// A safe way to store data
@@ -372,10 +372,8 @@ impl DataStore {
     }
 
     pub fn insert(&mut self, data: Data)->DataRef {
-        // println!("Create box");
-        let db = DataBox::new(data);
         // println!("Create ref");
-        let dr = DataRef::new(db);
+        let dr = DataRef::new(data);
 
         // println!("Before push");
         self.datas.insert(dr.clone().hashable());
@@ -468,16 +466,11 @@ impl DataStore {
             eprintln!("DEBUG: Took {iter} iterations to set all reachable datas to the current generation");
         }
 
-        let datas = mem::take(&mut self.datas);
-        // reserve a quarter of the previous allocations in the new datas vector
-        self.datas.reserve(datas.len() / 4);
-
         let mut dealloc_size = 0;
 
-        for data in datas.into_iter() {
+        self.datas.retain(|data|{
             if data.0.get_generation() == generation {
-                self.datas.insert(data);
-                continue;
+                return true;
             }
 
             assert!(!data.0.is_pinned());
@@ -489,10 +482,14 @@ impl DataStore {
 
             // SAFETY: We have already shaken the tree, set all reachable datas, and otherwise made
             // sure this won't (maybe? pleeeease?) cause any UB or memory errors.
+            // We are also going to remove this pointer after this function, so cloning and
+            // deallocating is alright. The `DataRef` will never be used again.
             unsafe {
-                data.0.dealloc();
+                data.clone().0.dealloc();
             }
-        }
+
+            return false;
+        });
 
         DEALLOCATIONS.with_borrow_mut(|d| *d += free_count);
 

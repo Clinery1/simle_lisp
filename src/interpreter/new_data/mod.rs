@@ -2,21 +2,34 @@
 // New data file
 
 
+use anyhow::Result;
+use bitvec::BitArr;
 use fnv::FnvHasher;
 use std::{
     hash::{
         Hasher,
         Hash,
     },
+    cell::UnsafeCell,
+    rc::Rc,
     ptr::NonNull,
     mem::MaybeUninit,
 };
-use super::Ident;
+use super::{
+    Ident,
+    Interpreter,
+    Interner,
+};
+use perfect_hasher::MinimalPerfectHasher;
 
 mod perfect_hasher;
 
 
-pub type Object = FlatMapObject;
+// pub type Object = FlatMapObject;
+
+pub type Mph = MinimalPerfectHasher<16>;
+
+pub type NativeFn = fn(Vec<BorrowedData>, &mut Interpreter, &mut Interner)->Result<Option<OwnedOrBorrowedData>>;
 
 
 pub trait BitSliceable {
@@ -35,65 +48,79 @@ pub enum Data {
     Char(char),
     Bool(bool),
 
-    List(Vec<DataRef>),
-    Object(FlatMapObject),
+    // List(Vec<DataRef>),
+    // Object(FlatMapObject),
+}
+
+// TODO: implement this
+pub enum NativeData {
+}
+
+pub enum OwnedOrBorrowedData {
+    Owned(OwnedData),
+    Borrowed(BorrowedData),
+}
+
+pub enum Builtin {
+    Object(&'static [(&'static str, Self)]),
+    Func(NativeFn),
+    NativeData(NativeData),
 }
 
 
 /// The first two bits store how many bytes of data the index takes
-pub struct UnsizedBitSlice<T: ?Sized + BitSliceable> {
+pub struct BitSlice<T: ?Sized + BitSliceable> {
     size: usize,
     data: T,
 }
-impl UnsizedBitSlice<[u8]> {
-    pub unsafe fn new_in(data: Vec<u8>, mut ptr: NonNull<[MaybeUninit<u8>]>)->NonNull<Self> {
-        // let mut_ref = unsafe {ptr.as_mut()};
-        // for data in mut_ref {
-        //     data.write(0);
-        // }
 
-        // let mut ptr = ptr.as_ptr() as *mut UnsizedBitSlice;
-
-        todo!();
-    }
+pub struct OwnedData<'a> {
+    ptr: NonNull<DataBox>,
+}
+impl Drop for OwnedData {
+}
+impl OwnedData {
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct DataRef {
+#[derive(Copy, Clone)]
+pub struct BorrowedData {
+    ptr: NonNull<DataBox>,
 }
 
-/// A minimal flatmap of Ident:DataRef
-pub struct FlatMapObject(Vec<(Ident, DataRef)>);
-impl FlatMapObject {
-    pub fn get(&self, i: Ident)->Option<DataRef> {
-        let index = self.get_index(i)?;
-
-        return Some(self.0[index].1);
-    }
-
-    pub fn insert(&mut self, i: Ident, data: DataRef)->Option<DataRef> {
-        todo!();
-    }
-
-    /// Performance is O(n) for keys not in the map, but averages much less for known keys.
-    fn get_index(&self, i: Ident)->Option<usize> {
-        let mut hasher = FnvHasher::default();
-        i.hash(&mut hasher);
-        let hash = hasher.finish() as usize;
-        let mut index = hash % self.0.len();
-        for _ in 0..self.0.len() {
-            if self.0[index].0 == i {
-                return Some(index);
-            }
-
-            index += 1;
-        }
-        return None;
-    }
+pub struct MutDataRef {
+    ptr: NonNull<DataBox>,
+    prev_generation: u64,
 }
 
-fn fnv_hash<T: Hash>(data: T)->u64 {
-    let mut hasher = FnvHasher::default();
-    data.hash(&mut hasher);
-    return hasher.finish();
+struct GcData {
+    ptr: NonNull<DataBox>,
 }
+
+struct DataBox {
+    pub gc: GcMetadata,
+
+    pub generation: u64,
+    pub data: UnsafeCell<Data>,
+}
+
+struct GcMetadata {
+    generation: u64,
+    owned: bool,
+}
+
+// ///A minimal flatmap of Ident:DataRef
+// pub struct FlatMapObject {
+//     items: Vec<DataRef>,
+//     hasher: Rc<Mph>,
+// }
+// impl FlatMapObject {
+//     pub fn get(&self, i: Ident)->Option<DataRef> {
+//         let index = self.hasher.get_index(i)?;
+
+//         return Some(self.items[index].clone());
+//     }
+
+//     pub fn insert(&mut self, i: Ident, data: DataRef)->Result<Option<DataRef>, DataRef> {
+//         todo!();
+//     }
+// }
