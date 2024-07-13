@@ -227,10 +227,10 @@ impl Env {
         return Err(data);
     }
 
-    pub fn get(&self, name: Ident)->Option<DataRef> {
+    pub fn get(&self, name: Ident, interner: &Interner)->Option<DataRef> {
         let values = self.vars.get(&name)?;
         if values.len() == 0 {
-            panic!("No values for var {name:?}");
+            panic!("No values for var {}", interner.get(name));
         }
 
         Some((*values[0]).clone())
@@ -477,12 +477,12 @@ impl Interpreter {
         // println!("Get var {}", interner.get(var));
 
         if self.env_stack.len() > 0 {
-            if let Some(dr) = self.env_stack[0].get(var) {
+            if let Some(dr) = self.env_stack[0].get(var, interner) {
                 return Ok(dr);
-            } else if let Some(dr) = self.root_env.get(var) {
+            } else if let Some(dr) = self.root_env.get(var, interner) {
                 return Ok(dr);
             }
-        } else if let Some(dr) = self.root_env.get(var) {
+        } else if let Some(dr) = self.root_env.get(var, interner) {
             return Ok(dr);
         }
 
@@ -618,6 +618,7 @@ impl Interpreter {
                             captures.push((*cap, self.get_var(*cap, &state.interner)?));
                         }
 
+                        let captures = ClosureCaptures(captures);
                         self.push_to_scope(Data::Closure{id: *id, captures});
                     } else {
                         self.push_to_scope(Data::Fn(*id));
@@ -793,7 +794,7 @@ impl Interpreter {
                                 self.push_env();
                                 self.push_env_scope();
 
-                                for (name, data) in captures {
+                                for (name, data) in &captures.0 {
                                     self.define_var(*name, data.clone(), &state.interner)?;
                                 }
 
@@ -903,7 +904,7 @@ impl Interpreter {
                                 self.clear_env();
                                 self.push_env_scope();
 
-                                for (name, data) in captures {
+                                for (name, data) in &captures.0 {
                                     self.define_var(*name, data.clone(), &state.interner)?;
                                 }
 

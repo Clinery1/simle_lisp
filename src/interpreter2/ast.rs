@@ -1,16 +1,22 @@
-use rustc_hash::FxBuildHasher;
+#![deny(unused_variables, unreachable_code)]
+
+
+//! # Ideas
+//! - All registers store both a cached `Data` and a `DataRef`. They evacuate the data to memory
+//!     when needed.
+//! - Variables are erased in the SSA IR.
+
+
+
 use anyhow::{
     Result,
     Error,
+    anyhow,
     bail,
 };
 use misc_utils::{
     SlotMap,
     Key,
-};
-use indexmap::{
-    IndexSet,
-    IndexMap,
 };
 use std::{
     hash::{
@@ -32,14 +38,17 @@ use std::{
 use crate::{
     ast::{
         Expr as RefExpr,
-        Field as RefField,
         FnSignature as RefFnSignature,
         Vector as RefVector,
         Fn as RefFn,
     },
     error_trace,
 };
-use super::IdentSet;
+use super::{
+    IdentSet,
+    FxIndexMap,
+    FxIndexSet,
+};
 
 
 const IS_TAIL: bool = true;
@@ -49,54 +58,49 @@ const NOT_TAIL: bool = false;
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum Instruction {
-    Nop,
     Exit,
 
     ReturnModule,
     Module(ModuleId),
 
-    /// Reads the previous result
-    Define(Ident),
-    /// Reads the previous result
-    Set(Ident),
+    Func(FnId),
 
-    FnOrClosure(FnId),
-
-    Var(Ident),
-    DotIdent(Ident),
+    SetVar(VarSlot),
+    SetPath(VarSlot, Vec<Ident>),
+    GetVar(VarSlot),
 
     Object(Vec<Ident>),
 
-    Path(Vec<Ident>),
+    Field(Ident),
+    // Path(SsaId, Vec<Ident>),
 
     Number(i64),
     Float(f64),
-    String(String),
+    String(Rc<String>),
     Char(char),
-    True,
-    False,
+    Bool(bool),
+    Byte(u8),
+    Ident(Ident),
+    None,
 
-    /// Reads the previous result
     Splat,
 
     /// Checks if the first data in the scope is callable. If so, then it calls it with the
-    /// arguments, otherwise everything is pushed into a list and returned.
-    Call,
-    TailCall,
+    /// arguments. If not, then it throws an error.
+    Call(usize),
+    TailCall(usize),
     Return,
 
-    StartReturnScope,
-    StartScope,
-    EndScope,
+    /// Start a scope with the given var slots
+    Scope(usize),
+    /// End a scope with the given var slots
+    EndScope(usize),
 
     /// Reads previous result
     JumpIfTrue(InstructionId),
     JumpIfFalse(InstructionId),
     Jump(InstructionId),
-
-    None,
 }
-
 #[derive(Debug, PartialEq)]
 pub enum FnSignature {
     Single {
@@ -104,9 +108,9 @@ pub enum FnSignature {
         body_ptr: InstructionId,
     },
     Multi {
-        exact: IndexMap<usize, (Vector, InstructionId), FxBuildHasher>,
+        exact: FxIndexMap<usize, (Vector, InstructionId)>,
         max_exact: usize,
-        at_least: IndexMap<usize, (Vector, InstructionId), FxBuildHasher>,
+        at_least: FxIndexMap<usize, (Vector, InstructionId)>,
         any: Option<(Vector, InstructionId)>,
     },
 }
@@ -148,6 +152,18 @@ impl FnSignature {
     }
 }
 
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct VarSlot {
+    pub id: usize,
+    pub global: bool,
+}
+impl Hash for VarSlot {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        self.id.hash(hasher);
+        self.global.hash(hasher);
+    }
+}
 
 #[derive(Debug)]
 pub struct ModuleError;
@@ -214,10 +230,10 @@ impl Hash for Ident {
 }
 
 #[derive(Debug)]
-pub struct Interner(IndexSet<String>);
+pub struct Interner(FxIndexSet<String>);
 impl Interner {
     pub fn new()->Self {
-        Interner(IndexSet::new())
+        Interner(FxIndexSet::default())
     }
 
     pub fn intern<S: Into<String>>(&mut self, s: S)->Ident {
@@ -236,19 +252,19 @@ pub struct InstructionStore {
 
     /// A list of instruction indices describing the order that they execute. Things CAN be removed
     /// from here.
-    ins_order: IndexSet<InstructionId, FxBuildHasher>,
+    ins_order: FxIndexSet<InstructionId>,
 }
 #[allow(dead_code)]
 impl InstructionStore {
     pub fn new()->Self {
         InstructionStore {
             instructions: Vec::new(),
-            ins_order: IndexSet::default(),
+            ins_order: FxIndexSet::default(),
         }
     }
 
     pub fn get_mut(&mut self, id: InstructionId)->&mut Instruction {
-        assert!(id.is_valid());
+        assert!(id.is_valid() && id.0 < self.instructions.len());
 
         &mut self.instructions[id.0]
     }
@@ -363,28 +379,144 @@ impl Key for ModuleId {
     fn id(&self)->usize {self.0}
 }
 
+/// Tracking for a global context
+pub struct VarState {
+    globals: FxIndexSet<Ident>,
+    scopes: Vec<VarScope>,
+    scope_var_count: usize,
+}
+impl VarState {
+    pub fn new(interner: &mut Interner)->Self {
+        let mut globals = FxIndexSet::default();
+        globals.insert(interner.intern("std"));
+        globals.insert(interner.intern("core"));
+
+        return VarState {
+            globals,
+            scopes: Vec::new(),
+            scope_var_count: 0,
+        };
+    }
+
+    pub fn reset(&mut self) {
+        self.globals.drain(2..);
+        self.scopes.clear();
+    }
+
+    pub fn reset_local(&mut self) {
+        self.scopes.clear();
+    }
+
+    pub fn insert(&mut self, name: Ident, interner: &Interner)->Result<VarSlot> {
+        if self.scopes.len() == 0 {
+            if self.globals.contains(&name) {
+                bail!("Global {} already exists", interner.get(name));
+            }
+
+            let id = self.globals.insert_full(name).0;
+
+            return Ok(VarSlot {
+                id,
+                global: true,
+            });
+        } else {
+            let scope = self.scopes.last_mut().unwrap();
+            if let Some(offset) = scope.vars.get_index_of(&name) {
+                return Ok(VarSlot {
+                    id: offset + scope.start_slot,
+                    global: false,
+                });
+            }
+
+            self.scope_var_count += 1;
+            let offset = scope.vars.insert_full(name).0;
+            return Ok(VarSlot {
+                id: offset + scope.start_slot,
+                global: false,
+            });
+        }
+    }
+
+    pub fn push_scope(&mut self, ins_id: InstructionId) {
+        self.scopes.push(VarScope {
+            ins_id,
+            start_slot: self.scope_var_count,
+            vars: FxIndexSet::default(),
+        });
+    }
+
+    pub fn pop_scope(&mut self)->(InstructionId, usize) {
+        let scope = self.scopes.pop().unwrap();
+        self.scope_var_count -= scope.vars.len();
+
+        return (scope.ins_id, scope.vars.len());
+    }
+
+    pub fn get(&self, name: Ident)->Option<VarSlot> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(offset) = scope.vars.get_index_of(&name) {
+                return Some(VarSlot {
+                    id: offset + scope.start_slot,
+                    global: false,
+                });
+            }
+        }
+
+        if let Some(offset) = self.globals.get_index_of(&name) {
+            return Some(VarSlot {
+                id: offset,
+                global: true,
+            });
+        }
+
+        return None;
+    }
+}
+
+pub struct VarScope {
+    ins_id: InstructionId,
+    start_slot: usize,
+    vars: FxIndexSet<Ident>,
+}
+
 pub struct ConvertState {
     pub interner: Interner,
     pub fns: SlotMap<FnId, Rc<Fn>>,
     pub warnings: Vec<Error>,
     pub instructions: InstructionStore,
     pub modules: ModuleTree,
+    pub vars: VarState,
     scope_start: Option<usize>,
     names_in_scope: IdentSet,
 }
 #[allow(dead_code)]
 impl ConvertState {
     pub fn new()->Self {
+        let mut interner = Interner::new();
+        let vars = VarState::new(&mut interner);
+
         ConvertState {
-            interner: Interner::new(),
+            interner,
             fns: SlotMap::new(),
             warnings: Vec::new(),
             instructions: InstructionStore::new(),
             modules: ModuleTree::new(),
+            vars,
             scope_start: None,
             names_in_scope: IdentSet::default(),
         }
     }
+
+    pub fn def_var(&mut self, name: &str)->Result<(Ident, VarSlot)> {
+        let name = self.intern(name);
+        return Ok((name, self.vars.insert(name, &self.interner)?));
+    }
+
+    pub fn lookup_var(&mut self, name: &str)->Option<VarSlot> {
+        let name = self.intern(name);
+        self.vars.get(name)
+    }
+
     #[inline]
     pub fn intern(&mut self, s: &str)->Ident {
         self.interner.intern(s)
@@ -396,13 +528,13 @@ impl ConvertState {
     }
 
     #[inline]
-    pub fn call_or_list(&mut self) {
-        self.instructions.push(Instruction::Call);
+    pub fn call(&mut self, arg_count: usize) {
+        self.instructions.push(Instruction::Call(arg_count));
     }
 
     #[inline]
-    pub fn tail_call_or_list(&mut self) {
-        self.instructions.push(Instruction::TailCall);
+    pub fn tail_call(&mut self, arg_count: usize) {
+        self.instructions.push(Instruction::TailCall(arg_count));
     }
 
     #[inline]
@@ -415,43 +547,35 @@ impl ConvertState {
         self.instructions.push(Instruction::ReturnModule);
     }
 
-    pub fn define(&mut self, i: &str) {
-        let ident = self.intern(i);
-
-        self.instructions.push(Instruction::Define(ident));
+    #[inline]
+    pub fn set_var(&mut self, slot: VarSlot) {
+        self.instructions.push(Instruction::SetVar(slot));
     }
 
-    pub fn set_var(&mut self, i: &str) {
-        let ident = self.intern(i);
-
-        self.instructions.push(Instruction::Set(ident));
+    #[inline]
+    pub fn set_path(&mut self, slot: VarSlot, path: Vec<Ident>) {
+        self.instructions.push(Instruction::SetPath(slot, path));
     }
 
-    pub fn ident(&mut self, i: &str) {
-        let ident = self.intern(i);
-
-        self.instructions.push(Instruction::Var(ident));
+    #[inline]
+    pub fn get_var(&mut self, slot: VarSlot) {
+        self.instructions.push(Instruction::GetVar(slot));
     }
 
     pub fn dot_ident(&mut self, i: &str) {
         let ident = self.intern(i);
 
-        self.instructions.push(Instruction::DotIdent(ident));
-    }
-
-    #[inline]
-    pub fn var(&mut self, i: Ident) {
-        self.instructions.push(Instruction::Var(i));
+        self.instructions.push(Instruction::Ident(ident));
     }
 
     #[inline]
     pub fn function(&mut self, f: FnId) {
-        self.instructions.push(Instruction::FnOrClosure(f));
+        self.instructions.push(Instruction::Func(f));
     }
 
     #[inline]
     pub fn string(&mut self, s: String) {
-        self.instructions.push(Instruction::String(s));
+        self.instructions.push(Instruction::String(Rc::new(s)));
     }
 
     #[inline]
@@ -465,13 +589,8 @@ impl ConvertState {
     }
 
     #[inline]
-    pub fn bool_true(&mut self) {
-        self.instructions.push(Instruction::True);
-    }
-
-    #[inline]
-    pub fn bool_false(&mut self) {
-        self.instructions.push(Instruction::False);
+    pub fn bool(&mut self, val: bool) {
+        self.instructions.push(Instruction::Bool(val));
     }
 
     #[inline]
@@ -495,16 +614,6 @@ impl ConvertState {
     }
 
     #[inline]
-    pub fn start_scope(&mut self) {
-        self.instructions.push(Instruction::StartScope);
-    }
-
-    #[inline]
-    pub fn end_scope(&mut self) {
-        self.instructions.push(Instruction::EndScope);
-    }
-
-    #[inline]
     pub fn push_exit(&mut self) {
         self.instructions.push(Instruction::Exit);
     }
@@ -525,20 +634,26 @@ impl ConvertState {
     }
 
     #[inline]
-    pub fn start_return_scope(&mut self) {
-        self.instructions.push(Instruction::StartReturnScope);
-    }
-
-    pub fn push_path(&mut self, path: Vec<&str>) {
-        let path = path.into_iter()
-            .map(|s|self.intern(s))
-            .collect();
-        self.instructions.push(Instruction::Path(path));
+    pub fn field(&mut self, name: Ident) {
+        self.instructions.push(Instruction::Field(name));
     }
 
     #[inline]
     pub fn reserve_func(&mut self)->FnId {
         self.fns.reserve_slot()
+    }
+
+    /// Start a scope and insert a placeholder
+    pub fn start_scope(&mut self) {
+        let id = self.instructions.push(Instruction::Scope(0));
+        self.vars.push_scope(id);
+    }
+
+    /// End a scope, update the start with the var count, and push the ending.
+    pub fn end_scope(&mut self) {
+        let (id, count) = self.vars.pop_scope();
+        *self.instructions.get_mut(id) = Instruction::Scope(count);
+        self.instructions.push(Instruction::EndScope(count));
     }
 
     pub fn reserve_module(&mut self)->ModuleId {
@@ -657,6 +772,7 @@ pub fn convert<'a>(exprs: Vec<RefExpr<'a>>)->Result<ConvertState> {
     state.push_exit();
     
     while let Some((id, f)) = todos.fns.pop_back() {
+        state.vars.reset_local();
         convert_fn(&mut state, &mut todos, f, id)?;
     }
 
@@ -670,6 +786,7 @@ pub fn convert<'a>(exprs: Vec<RefExpr<'a>>)->Result<ConvertState> {
     }).unwrap();
 
     while let Some(todo) = module_todos.pop_back() {
+        state.vars.reset();
         convert_module(&mut state, &mut module_todos, todo)?;
     }
 
@@ -685,10 +802,12 @@ pub fn repl_convert<'a>(state: &mut ConvertState, exprs: Vec<RefExpr<'a>>)->Resu
     state.push_exit();
     
     while let Some((id, f)) = todos.fns.pop_front() {
+        state.vars.reset_local();
         convert_fn(state, &mut todos, f, id)?;
     }
 
     while let Some(todo) = module_todos.pop_back() {
+        state.vars.reset();
         convert_module(state, &mut module_todos, todo)?;
     }
 
@@ -734,6 +853,7 @@ fn convert_module<'a>(state: &mut ConvertState, module_todos: &'a mut VecDeque<T
     state.push_module_return();
 
     while let Some((id, f)) = todos.fns.pop_back() {
+        state.vars.reset_local();
         if let Err(e) = convert_fn(state, &mut todos, f, id) {
             error_trace(e, &source, path.display());
             bail!(ModuleError);
@@ -764,13 +884,17 @@ fn convert_exprs<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, ex
 
 fn convert_single_expr<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, expr: RefExpr<'a>, is_tail: bool)->Result<()> {
     Ok(match expr {
-        RefExpr::True=>state.bool_true(),
-        RefExpr::False=>state.bool_false(),
+        RefExpr::True=>state.bool(true),
+        RefExpr::False=>state.bool(false),
         RefExpr::Number(n)=>state.number(n),
         RefExpr::Float(f)=>state.float(f),
         RefExpr::String(s)=>state.string(s),
         RefExpr::Char(c)=>state.char(c),
-        RefExpr::Ident(i)=>state.ident(i),
+        RefExpr::Ident(i)=>{
+            let slot = state.lookup_var(i)
+                .ok_or(anyhow!("Var {} does not exist", i))?;
+            state.get_var(slot)
+        },
         RefExpr::DotIdent(i)=>state.dot_ident(i),
         RefExpr::Comment(_)=>{},
         RefExpr::Module(name)=>{
@@ -781,41 +905,39 @@ fn convert_single_expr<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, '
         RefExpr::Def{name, data}=>{
             convert_single_expr(state, todos, *data, is_tail)?;
 
-            state.define(name);
+            let (_, slot) = state.def_var(name)?;
+            state.set_var(slot);
         },
         RefExpr::Set{name, data}=>{
             convert_single_expr(state, todos, *data, is_tail)?;
 
-            state.set_var(name);
+            let slot = state.lookup_var(name)
+                .ok_or(anyhow!("Var {} does not exist", name))?;
+            state.set_var(slot);
         },
-        // RefExpr::SetPath{path, data}=>{
-        RefExpr::SetPath{..}=>{
-            todo!();
-        },
-        RefExpr::Object(fields)=>{
-            state.start_scope();
-            let mut new_fields = Vec::with_capacity(fields.len());
-            for field in fields {
-                match field {
-                    RefField::Shorthand(i)=>{
-                        new_fields.push(state.intern(i));
-                        state.ident(i);
-                    },
-                    RefField::Full(i, expr)=>{
-                        new_fields.push(state.intern(i));
-                        state.start_scope();
-                        convert_single_expr(state, todos, expr, NOT_TAIL)?;
-                        state.end_scope();
-                    },
-                }
-            }
+        RefExpr::SetPath{path, data}=>{
+            convert_single_expr(state, todos, *data, is_tail)?;
 
+            let mut path_iter = path.into_iter();
+            let name = path_iter.next().unwrap();
+            let slot = state.lookup_var(name)
+                .ok_or(anyhow!("Var {} does not exist", name))?;
 
-            state.object(new_fields);
-            state.end_scope();
+            let path = path_iter.map(|n|state.intern(n)).collect::<Vec<_>>();
+            state.set_path(slot, path);
         },
+        RefExpr::Object(_)=>panic!("Not supported in the new interpreter!"),
         RefExpr::Path(path)=>{
-            state.push_path(path);
+            let mut path_iter = path.into_iter();
+            let var = path_iter.next().unwrap();
+            let slot = state.lookup_var(var)
+                .ok_or(anyhow!("Var {} does not exist", var))?;
+            state.get_var(slot);
+
+            for name in path_iter {
+                let i = state.intern(name);
+                state.field(i);
+            }
         },
         RefExpr::Fn(f)=>{
             let id = state.reserve_func();
@@ -883,21 +1005,22 @@ fn convert_single_expr<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, '
             state.splat();
         },
         RefExpr::Begin(exprs)=>{
-            state.start_return_scope();
+            state.start_scope();
 
             convert_exprs(state, todos, exprs, is_tail)?;
             
             state.end_scope();
         },
         RefExpr::List(exprs)=>{
+            let arg_count = exprs.len() - 1;
             state.start_scope();
 
             convert_exprs(state, todos, exprs, is_tail)?;
 
             if is_tail {
-                state.tail_call_or_list();
+                state.tail_call(arg_count);
             } else {
-                state.call_or_list();
+                state.call(arg_count);
             }
         },
         RefExpr::None=>state.push_none(),
@@ -940,9 +1063,9 @@ fn convert_signature<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>
             return Ok(FnSignature::Single{params, body_ptr});
         },
         RefFnSignature::Multi(items)=>{
-            let mut exact = IndexMap::default();
+            let mut exact = FxIndexMap::default();
             let mut max_exact = 0;
-            let mut at_least = IndexMap::default();
+            let mut at_least = FxIndexMap::default();
             let mut any = None;
 
             for (params, body) in items {

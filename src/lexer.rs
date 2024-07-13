@@ -16,7 +16,7 @@ pub enum Token<'a> {
     #[regex("[^/:;\\\\ .\t\r\n()\\[\\]{}\"'#0-9][^/ .\t\r\n()\\[\\]{}\"]*/", parse_path)]
     Path(Vec<&'a str>),
 
-    #[regex("\\.[^ .\t\r\n()\\[\\]{}\"]*", strip_first)]
+    #[regex("\\.[^ .\t\r\n()\\[\\]{}\"]+", strip_first)]
     DotIdent(&'a str),
 
     #[regex("[0-9][0-9_]*", number)]
@@ -27,6 +27,10 @@ pub enum Token<'a> {
 
     #[token("\"", string)]
     String(String),
+
+    #[regex("#x[0-9A-Fa-f]{2}", parse_byte_hex)]
+    #[regex("#b[01]{1,8}", parse_byte_bin)]
+    Byte(u8),
 
     #[token("\\space", |_|' ')]
     #[token("\\newline", |_|'\n')]
@@ -40,7 +44,7 @@ pub enum Token<'a> {
     #[token("...", priority = 10)]
     Splat,  // ...(and the list went SPLAT!)
 
-    #[regex("#[^ \t\r\n()\"]+", strip_first)]
+    #[regex("#[a-zA-Z_]+", strip_first)]
     HashLiteral(&'a str),
 
     #[regex(":[^ .\t\r\n()\\[\\]{}\"]*", strip_first)]
@@ -204,4 +208,14 @@ fn parse_path<'a>(l: &mut Lexer<'a, Token<'a>>)->Vec<&'a str> {
     l.bump(count);
 
     return out;
+}
+
+fn parse_byte_hex<'a>(lex: &mut Lexer<'a, Token<'a>>)->Option<u8> {
+    let hex = &lex.slice()[2..];
+    u8::from_str_radix(hex, 16).ok()
+}
+
+fn parse_byte_bin<'a>(lex: &mut Lexer<'a, Token<'a>>)->Option<u8> {
+    let bin = &lex.slice()[2..];
+    u8::from_str_radix(bin, 2).ok()
 }

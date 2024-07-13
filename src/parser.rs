@@ -159,6 +159,14 @@ impl<'a> MyParser<'a> {
         }
     }
 
+    fn path(&mut self)->Result<Vec<&'a str>> {
+        match self.next() {
+            Token::Path(i)=>Ok(i),
+            Token::EOF if self.user_data.repl=>bail!(ReplContinue(self.error("Unexpected EOF"))),
+            _=>bail!(self.error("Unexpected token. Expected path")),
+        }
+    }
+
     fn dot_ident(&mut self)->Result<&'a str> {
         match self.next() {
             Token::DotIdent(i)=>Ok(i),
@@ -214,6 +222,7 @@ impl<'a> MyParser<'a> {
             } else {
                 bail!(self.error("Unexpected EOF"));
             },
+            _=>todo!(),
         }
     }
 
@@ -461,6 +470,31 @@ impl<'a> MyParser<'a> {
     fn parse_set(&mut self)->Result<Expr<'a>> {
         self.match_ident("set")?;
 
+        match self.peek() {
+            Token::Ident(_)=>self.parse_set_ident(),
+            Token::Path(_)=>self.parse_set_path(),
+            _=>bail!("Expected Ident or Path"),
+        }
+    }
+
+    fn parse_set_path(&mut self)->Result<Expr<'a>> {
+        let path = self.path()
+            .context("Set name")?;
+
+        let data = self.parse_expr()
+            .map(Box::new)
+            .context("Set data")?;
+
+        self.end_list()
+            .context("End set")?;
+
+        return Ok(Expr::SetPath {
+            path,
+            data,
+        });
+    }
+
+    fn parse_set_ident(&mut self)->Result<Expr<'a>> {
         let name = self.ident()
             .context("Set name")?;
 
@@ -578,6 +612,7 @@ impl<'a> MyParser<'a> {
                 bail!(self.error("Unexpected EOF"));
             },
             Token::ReplDirective(_)=>bail!(self.error("Repl directives are only allowed at the root level")),
+            _=>todo!(),
         }
     }
 

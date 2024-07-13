@@ -12,6 +12,10 @@ pub enum Expr<'a> {
         name: &'a str,
         data: Box<Self>,
     },
+    SetPath {
+        path: Vec<&'a str>,
+        data: Box<Self>,
+    },
 
     /// Named function definition is just sugar for `VarDef {init: Fn(...) ...}`
     Fn(Fn<'a>),

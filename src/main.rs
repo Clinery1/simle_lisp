@@ -1,3 +1,10 @@
+#![deny(unsafe_code)]
+
+
+//! We deny all unsafe code EXCEPT in the garbage collection logic and behind-the-scenes data
+//! handling logic which needs to work with raw pointers. While we could do a deny-unsafe GC, it is
+//! more performant and MUCH easier to just have `DataRef` be a pointer to an object so we can
+//! access it any time we want instead of going through the collector's list of objects.
 //! TODO: `Error` type for proper error handling
 
 
@@ -26,15 +33,23 @@ mod lexer;
 mod parser;
 mod ast;
 mod interpreter;
+mod interpreter2;
 mod repl;
 
 
 #[derive(Clone, Subcommand)]
 enum Action {
+    /// Run with the V1 interpreter
     Run {
         /// The file to execute
         filename: String,
     },
+    /// Run with the V2 interpreter
+    Run2 {
+        /// The file to execute
+        filename: String,
+    },
+    /// Run a REPL with the V1 interpreter
     Repl,
 }
 
@@ -56,6 +71,9 @@ struct Cli {
 
 
 fn main() {
+    env_logger::init();
+    log::set_max_level(log::LevelFilter::Warn);
+
     let args = Cli::parse();
 
     match args.action {
@@ -66,7 +84,7 @@ fn main() {
         Some(Action::Run{filename})=>run(filename, args.stats_for_nerds, args.debug),
     }
 }
-    
+
 fn run(name: String, stats_for_nerds: bool, debug: u8) {
     let source = read_to_string(name).unwrap();
 
@@ -94,7 +112,75 @@ fn run(name: String, stats_for_nerds: bool, debug: u8) {
                 }
             }
 
-            let mut state = convert(exprs).unwrap();
+            let mut state = interpreter::ast::convert(exprs).unwrap();
+            let mut interpreter = Interpreter::new(&mut state);
+
+            if debug >= 3 {
+                use interpreter::ast::Instruction;
+                let mut iter = state.instructions.iter();
+                let mut i = 0;
+                while let Some(ins) = iter.next() {
+                    let id = iter.cur_ins_id().unwrap();
+                    match ins {
+                        Instruction::Nop=>break,
+                        _=>{},
+                    }
+                    println!("#{i:<3.} Id({:3.}) > {:?}", id.inner(), ins);
+
+                    i += 1;
+                }
+            }
+
+            let res = interpreter.run(&mut state, None);
+            match res {
+                Ok(res)=>{
+                    if stats_for_nerds {
+                        println!("> {res:?}");
+                        println!("Allocations: {}", interpreter.metrics.allocations);
+                        println!("Max call stack depth: {}", interpreter.metrics.max_call_stack_depth);
+                        println!("Instruction count: {}", interpreter.metrics.instructions_executed);
+                        println!("Max bytes allocated at once: {}", interpreter.metrics.max_allocation_bytes);
+                        println!("Runtime: {:?}", interpreter.metrics.total_run_time);
+                        let rt = interpreter.metrics.total_run_time.as_secs_f32();
+                        let ins_per_sec = interpreter.metrics.instructions_executed as f32 / rt;
+                        println!("{} ins/s", human_readable_fmt(ins_per_sec));
+                    }
+                },
+                Err(e)=>error_trace(e, &source, "example"),
+            }
+        },
+        Err(e)=>error_trace(e, &source, "example"),
+    }
+}
+
+fn run2(name: String, stats_for_nerds: bool, debug: u8) {
+    let source = read_to_string(name).unwrap();
+
+    let mut parser = parser::new_parser(source.as_str());
+
+    let parse_start = Instant::now();
+    match parser.parse_all() {
+        Ok(exprs)=>{
+            let end = parse_start.elapsed();
+            if stats_for_nerds {
+                println!("Parse time: {end:?}");
+                let size = source.len() as f32;
+                let time = end.as_secs_f32();
+                let speed = size / (time * (1024.0 * 1024.0));
+                println!("{speed}MB/s");
+            }
+
+            if debug >= 1 {
+                println!("{} root AST nodes", exprs.len());
+            }
+
+            if debug >= 2 {
+                for expr in exprs.iter() {
+                    println!("{expr:#?}");
+                }
+            }
+
+            let mut state = interpreter::ast::convert(exprs).unwrap();
             let mut interpreter = Interpreter::new(&mut state);
 
             if debug >= 3 {

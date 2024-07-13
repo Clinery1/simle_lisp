@@ -1,3 +1,5 @@
+#![allow(unsafe_code)]
+
 use rustc_hash::FxBuildHasher;
 use indexmap::IndexSet;
 use std::{
@@ -83,7 +85,7 @@ pub enum Data {
     NativeFn(&'static str, NativeFn, ArgCount),
     Closure {
         id: FnId,
-        captures: Vec<(Ident, DataRef)>,
+        captures: ClosureCaptures,
     },
 
     NativeData(NativeData),
@@ -101,7 +103,7 @@ impl Data {
                 .cloned()
                 .map(HashableDataRef)
             ),
-            Self::Closure{captures,..}=>refs.extend(captures.iter()
+            Self::Closure{captures,..}=>refs.extend(captures.0.iter()
                 .cloned()
                 .map(|(_,c)|c)
                 .map(HashableDataRef)
@@ -126,7 +128,7 @@ impl Data {
                                         // so it doesn't matter much anyways
                 Self::None=>{},
 
-            Self::Closure{captures,..}=>alloc_size += captures.capacity() * mem::size_of::<(Ident, DataRef)>(),
+            Self::Closure{captures,..}=>alloc_size += captures.0.capacity() * mem::size_of::<(Ident, DataRef)>(),
 
             Self::String(s)=>alloc_size += s.capacity(),
             Self::List(items)=>alloc_size += items.capacity() * mem::size_of::<DataRef>(),
@@ -137,6 +139,14 @@ impl Data {
     }
 }
 
+
+#[derive(Clone, PartialEq)]
+pub struct ClosureCaptures(pub Vec<(Ident, DataRef)>);
+impl Debug for ClosureCaptures {
+    fn fmt(&self, f: &mut Formatter)->FmtResult {
+        write!(f, "<closureCaptures>")
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct HashableDataRef(pub DataRef);

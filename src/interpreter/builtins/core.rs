@@ -24,8 +24,35 @@ pub const BUILTINS: &[(&str, NativeFn, ArgCount)] = &[
     builtin!(clone, 1),
     builtin!(debug, Any),
     builtin!(intern, 1),
+    builtin!(fields, 1),
+    builtin!(is_ident, isIdent, 1),
 ];
 
+
+pub fn is_ident(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
+    match &*args[0].get_data() {
+        Data::Ident(_)=>Ok(i.alloc(Data::Bool(true))),
+        _=>Ok(i.alloc(Data::Bool(false))),
+    }
+}
+
+pub fn fields(args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
+    match &*args[0].get_data() {
+        Data::Object(fields)=>{
+            let mut list = Vec::new();
+            for (name, value) in fields.iter() {
+                let list2 = vec![
+                    i.alloc(Data::Ident(*name)),
+                    value.clone(),
+                ];
+                list.push(i.alloc(Data::List(list2)));
+            }
+
+            return Ok(i.alloc(Data::List(list)));
+        },
+        _=>bail!("Value passed to `fields` is not an object!"),
+    }
+}
 
 pub fn gc_collect(_args: Vec<DataRef>, i: &mut Interpreter, _: &mut Interner)->Result<DataRef> {
     let count = i.gc_collect();

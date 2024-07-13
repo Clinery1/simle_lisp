@@ -3,17 +3,24 @@ name = "simple_lisp"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+gc_debug_asserts = []
+
 
 [dependencies]
 anyhow = "1.0.82"
+arrayvec = "0.7.4"
+bitflags = "2.6.0"
 bitvec = "1.0.1"
 clap = { version = "4.5.4", features = ["derive"] }
 crossterm = "0.27.0"
+env_logger = "0.11.3"
 fnv = "1.0.7"
 indexmap = "2.2.6"
+log = { version = "0.4.21", features = ["max_level_debug", "release_max_level_warn"] }
 logos = "0.14.0"
-misc_utils = { git = "https://github.com/Clinery1/misc_utils.git", version = "0.4.0" }
+misc_utils = { git = "https://github.com/Clinery1/misc_utils.git", version = "0.4.3" }
 parser_helper = { git = "https://github.com/Clinery1/parser_helper.git", version = "0.4.0", features = ["logos"] }
 ropey = "1.6.1"
 rustc-hash = "2.0.0"
