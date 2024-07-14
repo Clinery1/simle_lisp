@@ -39,7 +39,6 @@ use crate::{
     },
     error_trace,
 };
-use super::IdentSet;
 
 
 const IS_TAIL: bool = true;
@@ -369,8 +368,6 @@ pub struct ConvertState {
     pub warnings: Vec<Error>,
     pub instructions: InstructionStore,
     pub modules: ModuleTree,
-    scope_start: Option<usize>,
-    names_in_scope: IdentSet,
 }
 #[allow(dead_code)]
 impl ConvertState {
@@ -381,8 +378,6 @@ impl ConvertState {
             warnings: Vec::new(),
             instructions: InstructionStore::new(),
             modules: ModuleTree::new(),
-            scope_start: None,
-            names_in_scope: IdentSet::default(),
         }
     }
     #[inline]
@@ -564,6 +559,7 @@ impl ConvertState {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ModuleNode {
     pub name: Ident,
     pub children: Vec<ModuleId>,

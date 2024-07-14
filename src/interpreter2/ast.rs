@@ -1,13 +1,6 @@
 #![deny(unused_variables, unreachable_code)]
 
 
-//! # Ideas
-//! - All registers store both a cached `Data` and a `DataRef`. They evacuate the data to memory
-//!     when needed.
-//! - Variables are erased in the SSA IR.
-
-
-
 use anyhow::{
     Result,
     Error,
@@ -45,9 +38,9 @@ use crate::{
     error_trace,
 };
 use super::{
-    IdentSet,
     FxIndexMap,
     FxIndexSet,
+    DEFAULT_GLOBALS,
 };
 
 
@@ -58,6 +51,8 @@ const NOT_TAIL: bool = false;
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum Instruction {
+    Nop,
+
     Exit,
 
     ReturnModule,
@@ -66,13 +61,10 @@ pub enum Instruction {
     Func(FnId),
 
     SetVar(VarSlot),
-    SetPath(VarSlot, Vec<Ident>),
+    SetPath(VarSlot, Rc<Vec<Ident>>),
     GetVar(VarSlot),
 
-    Object(Vec<Ident>),
-
     Field(Ident),
-    // Path(SsaId, Vec<Ident>),
 
     Number(i64),
     Float(f64),
@@ -124,7 +116,7 @@ impl FnSignature {
                 if params.items.len() < count && params.remainder.is_none() {
                     return None;
                 }
-                
+
                 return Some((params, *body_ptr));
             },
             Self::Multi{exact, max_exact, at_least, any}=>{
@@ -339,10 +331,14 @@ impl<'a> InstructionIter<'a> {
         self.index = index;
     }
 
+    /// The next id to execute.
+    /// Example: [... current, next, ...]
     pub fn next_ins_id(&self)->Option<InstructionId> {
         self.inner.ins_order.get_index(self.index).copied()
     }
 
+    /// The id of the currently executing instruction.
+    /// Example: [... current, next, ...]
     pub fn cur_ins_id(&self)->Option<InstructionId> {
         self.inner.ins_order.get_index(self.index.saturating_sub(1)).copied()
     }
@@ -388,8 +384,10 @@ pub struct VarState {
 impl VarState {
     pub fn new(interner: &mut Interner)->Self {
         let mut globals = FxIndexSet::default();
-        globals.insert(interner.intern("std"));
-        globals.insert(interner.intern("core"));
+        for global in DEFAULT_GLOBALS {
+            globals.insert(interner.intern(*global));
+        }
+
 
         return VarState {
             globals,
@@ -399,7 +397,7 @@ impl VarState {
     }
 
     pub fn reset(&mut self) {
-        self.globals.drain(2..);
+        self.globals.drain(DEFAULT_GLOBALS.len()..);
         self.scopes.clear();
     }
 
@@ -486,8 +484,6 @@ pub struct ConvertState {
     pub instructions: InstructionStore,
     pub modules: ModuleTree,
     pub vars: VarState,
-    scope_start: Option<usize>,
-    names_in_scope: IdentSet,
 }
 #[allow(dead_code)]
 impl ConvertState {
@@ -502,14 +498,16 @@ impl ConvertState {
             instructions: InstructionStore::new(),
             modules: ModuleTree::new(),
             vars,
-            scope_start: None,
-            names_in_scope: IdentSet::default(),
         }
     }
 
     pub fn def_var(&mut self, name: &str)->Result<(Ident, VarSlot)> {
         let name = self.intern(name);
         return Ok((name, self.vars.insert(name, &self.interner)?));
+    }
+
+    pub fn def_var_ident(&mut self, name: Ident)->Result<VarSlot> {
+        return Ok(self.vars.insert(name, &self.interner)?);
     }
 
     pub fn lookup_var(&mut self, name: &str)->Option<VarSlot> {
@@ -554,7 +552,7 @@ impl ConvertState {
 
     #[inline]
     pub fn set_path(&mut self, slot: VarSlot, path: Vec<Ident>) {
-        self.instructions.push(Instruction::SetPath(slot, path));
+        self.instructions.push(Instruction::SetPath(slot, Rc::new(path)));
     }
 
     #[inline]
@@ -626,11 +624,6 @@ impl ConvertState {
     #[inline]
     pub fn char(&mut self, c: char) {
         self.instructions.push(Instruction::Char(c));
-    }
-
-    #[inline]
-    pub fn object(&mut self, fields: Vec<Ident>) {
-        self.instructions.push(Instruction::Object(fields));
     }
 
     #[inline]
@@ -767,10 +760,10 @@ pub fn convert<'a>(exprs: Vec<RefExpr<'a>>)->Result<ConvertState> {
     todos.current_module = root_module;
 
     let start_ins = state.next_ins_id();
-    convert_exprs(&mut state, &mut todos, exprs, false)?;
+    convert_exprs(&mut state, &mut todos, exprs.into_iter(), false)?;
 
     state.push_exit();
-    
+
     while let Some((id, f)) = todos.fns.pop_back() {
         state.vars.reset_local();
         convert_fn(&mut state, &mut todos, f, id)?;
@@ -793,26 +786,26 @@ pub fn convert<'a>(exprs: Vec<RefExpr<'a>>)->Result<ConvertState> {
     return Ok(state);
 }
 
-pub fn repl_convert<'a>(state: &mut ConvertState, exprs: Vec<RefExpr<'a>>)->Result<InstructionId> {
-    let start_id = state.next_ins_id();
-    let mut module_todos = VecDeque::new();
-    let mut todos = Todos::new(&mut module_todos);
-    convert_exprs(state, &mut todos, exprs, false)?;
+// pub fn repl_convert<'a>(state: &mut ConvertState, exprs: Vec<RefExpr<'a>>)->Result<InstructionId> {
+//     let start_id = state.next_ins_id();
+//     let mut module_todos = VecDeque::new();
+//     let mut todos = Todos::new(&mut module_todos);
+//     convert_exprs(state, &mut todos, exprs, false)?;
 
-    state.push_exit();
-    
-    while let Some((id, f)) = todos.fns.pop_front() {
-        state.vars.reset_local();
-        convert_fn(state, &mut todos, f, id)?;
-    }
+//     state.push_exit();
 
-    while let Some(todo) = module_todos.pop_back() {
-        state.vars.reset();
-        convert_module(state, &mut module_todos, todo)?;
-    }
+//     while let Some((id, f)) = todos.fns.pop_front() {
+//         state.vars.reset_local();
+//         convert_fn(state, &mut todos, f, id)?;
+//     }
 
-    return Ok(start_id);
-}
+//     while let Some(todo) = module_todos.pop_back() {
+//         state.vars.reset();
+//         convert_module(state, &mut module_todos, todo)?;
+//     }
+
+//     return Ok(start_id);
+// }
 
 fn convert_module<'a>(state: &mut ConvertState, module_todos: &'a mut VecDeque<TodoModule>, module_todo: TodoModule)->Result<()> {
     let mut todos = Todos::new(module_todos);
@@ -845,7 +838,7 @@ fn convert_module<'a>(state: &mut ConvertState, module_todos: &'a mut VecDeque<T
     drop(parser);
 
     let start_ins = state.next_ins_id();
-    if let Err(e) = convert_exprs(state, &mut todos, exprs, NOT_TAIL) {
+    if let Err(e) = convert_exprs(state, &mut todos, exprs.into_iter(), NOT_TAIL) {
         error_trace(e, &source, path.display());
         bail!(ModuleError);
     }
@@ -872,7 +865,9 @@ fn convert_module<'a>(state: &mut ConvertState, module_todos: &'a mut VecDeque<T
     return Ok(());
 }
 
-fn convert_exprs<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, exprs: Vec<RefExpr<'a>>, is_tail: bool)->Result<()> {
+fn convert_exprs<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, exprs: impl ExactSizeIterator<Item = RefExpr<'a>>, is_tail: bool)->Result<()> {
+    if exprs.len() == 0 {return Ok(())}
+
     let last = exprs.len() - 1;
     for (i, expr) in exprs.into_iter().enumerate() {
         let expr_is_tail = (i == last) && is_tail;
@@ -958,7 +953,7 @@ fn convert_single_expr<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, '
                     let this_id = state.next_ins_id();
                     state.instructions.set(id, Instruction::JumpIfFalse(this_id));
                 }
-                
+
                 convert_single_expr(state, todos, condition, NOT_TAIL)?;
 
                 let id = state.instructions.push(Instruction::Exit);
@@ -1007,15 +1002,22 @@ fn convert_single_expr<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, '
         RefExpr::Begin(exprs)=>{
             state.start_scope();
 
-            convert_exprs(state, todos, exprs, is_tail)?;
-            
+            convert_exprs(state, todos, exprs.into_iter(), is_tail)?;
+
             state.end_scope();
         },
         RefExpr::List(exprs)=>{
             let arg_count = exprs.len() - 1;
             state.start_scope();
+            let mut exprs_iter = exprs.into_iter();
 
-            convert_exprs(state, todos, exprs, is_tail)?;
+            let first = exprs_iter.next().unwrap();
+
+            convert_exprs(state, todos, exprs_iter.rev(), is_tail)?;
+
+            convert_single_expr(state, todos, first, NOT_TAIL)?;
+
+            state.end_scope();
 
             if is_tail {
                 state.tail_call(arg_count);
@@ -1033,7 +1035,6 @@ fn convert_single_expr<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, '
 
 fn convert_fn<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, func: RefFn<'a>, id: FnId)->Result<()> {
     let name = func.name.map(|n|state.intern(n));
-    let sig = convert_signature(state, todos, func.signature)?;
     let captures = func.captures
         .map(|c|c.items
             .into_iter()
@@ -1041,6 +1042,13 @@ fn convert_fn<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, func:
             .collect::<Vec<_>>()
         )
         .unwrap_or_default();
+
+    // TODO: Actually implement this thing
+    if captures.len() > 0 {
+        todo!("Function captures");
+    }
+
+    let sig = convert_signature(state, todos, func.signature, &captures)?;
 
     state.fns.insert_reserved(id, Rc::new(Fn {
         id,
@@ -1051,13 +1059,29 @@ fn convert_fn<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, func:
     return Ok(());
 }
 
-fn convert_signature<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, sig: RefFnSignature<'a>)->Result<FnSignature> {
+fn def_func_cap_params(state: &mut ConvertState, caps: &[Ident], params: &Vector)->Result<()> {
+    for cap in caps {
+        state.def_var_ident(*cap)?;
+    }
+    for param in params.items.iter() {
+        state.def_var_ident(*param)?;
+    }
+    if let Some(rem) = params.remainder {
+        state.def_var_ident(rem)?;
+    }
+
+    return Ok(());
+}
+
+fn convert_signature<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>, sig: RefFnSignature<'a>, captures: &[Ident])->Result<FnSignature> {
     match sig {
         RefFnSignature::Single(params, body)=>{
             let params = convert_vector(state, params);
 
+            def_func_cap_params(state, captures, &params)?;
+
             let body_ptr = state.next_ins_id();
-            convert_exprs(state, todos, body, IS_TAIL)?;
+            convert_exprs(state, todos, body.into_iter(), IS_TAIL)?;
             state.push_return();
 
             return Ok(FnSignature::Single{params, body_ptr});
@@ -1069,10 +1093,14 @@ fn convert_signature<'a, 'b>(state: &mut ConvertState, todos: &mut Todos<'a, 'b>
             let mut any = None;
 
             for (params, body) in items {
+                state.vars.reset_local();
+
                 let params = convert_vector(state, params);
 
+                def_func_cap_params(state, captures, &params)?;
+
                 let body_ptr = state.next_ins_id();
-                convert_exprs(state, todos, body, IS_TAIL)?;
+                convert_exprs(state, todos, body.into_iter(), IS_TAIL)?;
                 state.push_return();
 
                 if params.remainder.is_some() {

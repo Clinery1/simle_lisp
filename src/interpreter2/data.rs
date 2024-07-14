@@ -1,8 +1,9 @@
-#![allow(unused)]
+// #![allow(unused)]
 #![allow(unsafe_code)]
 
 #![warn(unused_mut)]
 #![deny(unused_variables, unreachable_code)]
+// #![allow(unused_variables, unreachable_code)]
 
 
 //! This collector is implemented assuming it is all single-threaded, and for now it is. If we want
@@ -11,6 +12,19 @@
 //! collector is DEFINITELY not `Send` or `Sync`. If we simply made everything involved `Send` and
 //! `Sync`, then we would have race conditions all over the place, so any threading model has to be
 //! implemented with message-passing for inter-thread communication.
+//!
+//! Side note: if you (hi there reader!) find any problems with this code, please file an issue! I
+//! have only "tested" this code with example code using the interpreter. I don't even know how I
+//! would go about writing tests for a garbage collector, so I just won't. (Kind of a running theme
+//! here...)
+//!
+//! Side note 2: if anything is lacking in comments or documentation AND isn't immediatly
+//! understandable from the code, also file an issue and I will write some comments! There are
+//! (as of writing) ~1550 lines here. This is the largest file in the entire project, and its an
+//! implementation of a topic I am still learning about, so its not really good code (yet).
+//!
+//! Side note 3: I use `unsafe` quite a lot. If you, the reader, have any suggestions to remove,
+//! abstract, or otherwise limit the scope of `unsafe`, please let me know with a PR or issue!
 
 
 use anyhow::{
@@ -29,7 +43,11 @@ use std::{
         Deref,
         DerefMut,
     },
-    fmt::Debug,
+    fmt::{
+        Debug,
+        Formatter,
+        Result as FmtResult,
+    },
     any::Any,
     ptr::NonNull,
     alloc::Layout,
@@ -39,15 +57,15 @@ use std::{
 };
 use super::{
     Interpreter,
-    InterpreterParams,
     Ident,
-    Interner,
     FnId,
+    ConvertState,
+    ArgCount,
 };
 
 
 // TODO: debug asserts
-const DEBUG_ASSERTS: bool = cfg!(gc_debug_assert);
+// const DEBUG_ASSERTS: bool = cfg!(gc_debug_assert);
 
 
 /// ## Description
@@ -59,7 +77,7 @@ const DEBUG_ASSERTS: bool = cfg!(gc_debug_assert);
 /// ## Uses
 /// The `BasicObject` type and `GcParams` type implement this, and so can be used seamlessly in the
 /// language as objects.
-/// 
+///
 /// ## Rant
 /// The sky is really the limit here. I could probably use this to add some dynamic loading logic
 /// to the language and allow dynamically loading extensions to the language. After looking into
@@ -67,17 +85,28 @@ const DEBUG_ASSERTS: bool = cfg!(gc_debug_assert);
 /// crates, but this would lock the interface to just Rust... Anyways, this is a topic for later.
 pub trait Object: Any + Debug {
     /// Call this object as if it were a function. The default implementation is to throw an error.
-    fn call<'a>(&mut self, _args: Vec<Primitive>, _params: ObjectParams<'a>)->Result<Primitive> {
+    fn call<'a>(&mut self, _args: Vec<Primitive>, _params: ObjectParams<'a>, _self_ref: DataRef)->Result<Primitive> {
         bail!("This Object is not callable!");
     }
 
     /// Call a method on the object. The default implementation is to throw an error.
-    fn call_method<'a>(&mut self, _name: Ident, _params: ObjectParams<'a>, _args: Vec<Primitive>)->Result<Primitive> {
+    fn call_method<'a>(&mut self, _name: Ident, _params: ObjectParams<'a>, _args: Vec<Primitive>, _self_ref: DataRef)->Result<Primitive> {
         bail!("This Object is not callable!");
     }
 
+    /// Compare self and another object. This is sadly required because I can't simply require
+    /// `PartialEq` to be implemented. It is not object safe because it uses `Self` which is
+    /// erased for Rust objects.
+    ///
+    /// ## Implementation details
+    /// The `PartialEq` implementation ensures the types are the same, so you can safely `unwrap`
+    /// the `downcase_ref` output.
+    fn compare(&self, other: &Box<dyn Object>)->bool;
+
     /// Called just before we deallocate `self` after collection. The default implementation is to
     /// do nothing.
+    ///
+    /// NOTE: This method is run during the final phase of the collector, so keep it short!
     ///
     /// NOTE: `Self`'s `Drop` implementation WILL STILL BE CALLED! This is simply called before
     /// drop.
@@ -95,12 +124,28 @@ pub trait Object: Any + Debug {
     /// succeed, but it MUST be documented.
     fn set_field<'a>(&mut self, name: Ident, _params: ObjectParams<'a>, data: Primitive)->Result<()>;
 }
+impl PartialEq for Box<dyn Object> {
+    fn eq(&self, other: &Self)->bool {
+        let self_type = self.type_id();
+        let other_type = other.type_id();
+
+        if self_type != other_type {
+            return false;
+        }
+
+        return self.compare(other);
+    }
+}
 
 pub trait GcTracer {
     fn trace(&mut self, _dr: DataRef);
 }
 
 
+pub type NativeFn = fn(ObjectParams, Vec<Primitive>)->Result<Primitive>;
+
+
+#[derive(Debug, PartialEq)]
 pub enum IncrementalState {
     GreyRoots,
     Trace,
@@ -112,7 +157,7 @@ impl Default for IncrementalState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Primitive {
     Int(i64),
     Float(f64),
@@ -128,7 +173,7 @@ pub enum Primitive {
     Root(RootDataRef),
 
     Func(FnId),
-    NativeFunc(FnId),
+    NativeFunc(NativeFn, ArgCount),
 }
 impl Clone for Primitive {
     fn clone(&self)->Self {
@@ -147,7 +192,7 @@ impl Clone for Primitive {
             Self::Root(r)=>Self::Ref(r.0),
 
             Self::Func(f)=>Self::Func(f.clone()),
-            Self::NativeFunc(f)=>Self::NativeFunc(f.clone()),
+            Self::NativeFunc(f, count)=>Self::NativeFunc(f.clone(), count.clone()),
         }
     }
 }
@@ -157,6 +202,28 @@ impl Primitive {
             Self::Ref(r)=>tracer.trace(*r),
             Self::Root(r)=>tracer.trace(r.0),
             _=>{},
+        }
+    }
+
+    /// Returns true if successful or self is not a Ref.
+    pub fn rooted(self)->Self {
+        match self {
+            Self::Ref(r)=>{
+                if let Some(rooted) = r.root() {
+                    Self::Root(rooted)
+                } else {
+                    Self::Ref(r)
+                }
+            },
+            p=>p,
+        }
+    }
+
+    /// Returns true if successful or self is not a Ref.
+    pub fn unroot(self)->Self {
+        match self {
+            Self::Root(r)=>Self::Ref(r.0),
+            p=>p,
         }
     }
 
@@ -189,6 +256,19 @@ pub enum Data {
     /// Only used in empty `DataBox`es. NEVER exposed to the interpreter or anything else. It is a
     /// bug to expose this outside this module.
     None,
+}
+impl PartialEq for Data {
+    fn eq(&self, other: &Self)->bool {
+        match (self, other) {
+            (Self::Closure{func, captures}, Self::Closure{func: func1, captures: captures1})=>{
+                func == func1 && captures == captures1
+            },
+            (Self::Object(obj1), Self::Object(obj2))=>obj1 == obj2,
+            (Self::List(items1), Self::List(items2))=>items1 == items2,
+            (Self::None, Self::None)=>true,
+            _=>false,
+        }
+    }
 }
 impl Data {
     fn finalize(&mut self) {
@@ -223,7 +303,7 @@ impl Data {
 
 
 bitflags::bitflags! {
-    #[derive(Debug, Copy, Clone)]
+    #[derive(Debug, Copy, Clone, PartialEq)]
     pub struct DataFlags:u8 {
         const DEAD          = 0b0000_0001;
         const A             = 0b0000_0010;
@@ -235,34 +315,29 @@ bitflags::bitflags! {
 }
 impl DataFlags {
     fn is_auto_grey(&self)->bool {
-        self.contains(Self::ROOT) | self.contains(Self::PERMANENT)
+        self.contains(Self::ROOT) || self.contains(Self::PERMANENT)
     }
 }
-
-
-#[derive(Clone)]
-pub struct TODO;
-
 
 pub struct ObjectParams<'a> {
-    pub interner: &'a mut Interner,
-    pub gc: &'a mut GcContext,
+    pub state: &'a mut ConvertState,
     pub interpreter: &'a mut Interpreter,
 }
-impl<'a> ObjectParams<'a> {
-    pub fn into_interp_params(self)->(&'a mut Interpreter, InterpreterParams<'a>) {
-        (
-            self.interpreter,
-            InterpreterParams {
-                gc: self.gc,
-                interner: self.interner,
-            },
-        )
+
+#[derive(Copy, Clone, Eq, Hash)]
+pub struct DataRef(NonNull<DataBox>);
+impl Debug for DataRef {
+    fn fmt(&self, f: &mut Formatter)->FmtResult {
+        self.deref().fmt(f)
     }
 }
+impl PartialEq for DataRef {
+    fn eq(&self, other: &Self)->bool {
+        if self.0 == other.0 {return true}
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct DataRef(NonNull<DataBox>);
+        self.deref() == other.deref()
+    }
+}
 impl Deref for DataRef {
     type Target = Data;
     fn deref(&self)->&'static Data {
@@ -285,6 +360,13 @@ impl DataRef {
         let ptr_ref = unsafe {self.0.as_mut()};
 
         return ptr_ref;
+    }
+
+    pub fn set_permanent(&self) {
+        let db = self.get_box();
+        let mut flags = db.flags.get();
+        flags |= DataFlags::PERMANENT;
+        db.flags.set(flags);
     }
 
     fn set_root(&self) {
@@ -320,6 +402,7 @@ impl Drop for RootDataRef {
     }
 }
 
+#[derive(Debug)]
 pub struct DataBox {
     next: Cell<NonNull<Self>>,
     prev: Cell<NonNull<Self>>,
@@ -328,7 +411,18 @@ pub struct DataBox {
     data: UnsafeCell<Data>,
 }
 impl DataBox {
-    pub fn empty(next: NonNull<Self>, prev: NonNull<Self>)->Self {
+    /// Requires a pointer to self. This is gotten by allocating memory and then passing that
+    /// pointer to here.
+    pub fn empty(self_ptr: NonNull<Self>)->Self {
+        DataBox {
+            next: Cell::new(self_ptr),
+            prev: Cell::new(self_ptr),
+            flags: Cell::new(DataFlags::DEAD),
+            data: UnsafeCell::new(Data::None),
+        }
+    }
+
+    pub fn from_prev_next(prev: NonNull<Self>, next: NonNull<Self>)->Self {
         DataBox {
             next: Cell::new(next),
             prev: Cell::new(prev),
@@ -372,47 +466,74 @@ impl DataBox {
     }
 
     /// Inserts `self` after `ptr` in the double linked list
-    /// NOTE: This might be the source of some bugs.
-    fn insert_after(&mut self, mut ptr: NonNull<Self>) {
+    fn insert_after(&mut self, mut prev: NonNull<Self>) {
+        self.assert_not_in_list();
+
         // get a ref to the given pointer
-        let ptr_box = unsafe {ptr.as_mut()};
+        let prev_box = unsafe {prev.as_mut()};
+        prev_box.assert_in_list();
 
-        // denote the values for `self.prev` and `self.next`
-        let self_prev = ptr;
-        let self_next = ptr_box.next.get();
-
-        // set them
-        self.prev.set(self_prev);
-        self.next.set(self_next);
-
-        // get a `NonNull` pointer to `self`
-        let self_ptr = ptr::from_mut(self);
-        let self_nn = unsafe{NonNull::new_unchecked(self_ptr)};
-
-        // set the given pointer's `next` to `self`
-        ptr_box.next.set(self_nn);
+        self.insert_between(prev, prev_box.next.get());
     }
 
     /// Inserts `self` before `ptr` in the double linked list
-    /// NOTE: This might be the source of some bugs.
-    fn insert_before(&mut self, mut ptr: NonNull<Self>) {
+    fn insert_before(&mut self, mut next: NonNull<Self>) {
+        self.assert_not_in_list();
+
         // get a ref to the given pointer
-        let ptr_box = unsafe {ptr.as_mut()};
+        let next_box = unsafe {next.as_mut()};
+        next_box.assert_in_list();
 
-        // denote the values for `self.prev` and `self.next`
-        let self_prev = ptr_box.prev.get();
-        let self_next = ptr;
+        self.insert_between(next_box.prev.get(), next);
+    }
 
-        // set them
-        self.prev.set(self_prev);
-        self.next.set(self_next);
+    fn move_to_after(&mut self, ptr: NonNull<Self>) {
+        let self_ptr = self.self_ptr();
+        assert!(ptr != self_ptr);
 
-        // get a `NonNull` pointer to `self`
-        let self_ptr = ptr::from_mut(self);
-        let self_nn = unsafe{NonNull::new_unchecked(self_ptr)};
+        self.remove_from_list();
 
-        // set the given pointer's `next` to `self`
-        ptr_box.prev.set(self_nn);
+        self.insert_after(ptr);
+        self.assert_in_list();
+    }
+
+    fn move_to_before(&mut self, ptr: NonNull<Self>) {
+        let self_ptr = self.self_ptr();
+        assert!(ptr != self_ptr);
+
+        self.remove_from_list();
+
+        self.insert_before(ptr);
+        self.assert_in_list();
+    }
+
+    fn self_ptr(&self)->NonNull<Self> {
+        let self_ptr = ptr::from_ref(self);
+        unsafe {NonNull::new_unchecked(self_ptr as *mut Self)}
+    }
+
+    /// NOTE: This might be the source of some bugs.
+    fn insert_between(&mut self, mut prev: NonNull<Self>, mut next: NonNull<Self>) {
+        self.assert_not_in_list();
+
+        let self_ptr = self.self_ptr();
+        assert!(prev != self_ptr);
+        assert!(next != self_ptr);
+
+        let next_box = unsafe {next.as_mut()};
+        let prev_box = unsafe {prev.as_mut()};
+        next_box.assert_in_list();
+        prev_box.assert_in_list();
+
+        // assert that the given boxes are actually adjacent.
+        assert!(prev_box.next.get() == next);
+        assert!(next_box.prev.get() == prev);
+
+        // swap self.prev (which should be a pointer to self) with next_box.prev making next_box
+        // point to self, and self.prev point to prev_box
+        next_box.prev.swap(&self.prev);
+        // do the same, but for prev_box and next
+        prev_box.next.swap(&self.next);
     }
 
     fn next(&self)->DataRef {
@@ -420,39 +541,102 @@ impl DataBox {
     }
 
     fn prev(&self)->DataRef {
-        DataRef(self.next.get())
+        DataRef(self.prev.get())
     }
 
+    /// Remove `self` from the list and make it point to itself both ways.
+    /// NOTE: This might be the source of some bugs.
     fn remove_from_list(&self) {
-        let mut prev = self.prev.get();
-        let mut next = self.next.get();
+        self.assert_in_list();
 
-        // set the previous item's `next` to this one's `next`
-        let prev_mut = unsafe {prev.as_mut()};
-        prev_mut.next.set(next);
+        let self_ptr = self.self_ptr();
 
-        // set the next item's `prev` to this one's `prev`
-        let next_mut = unsafe {next.as_mut()};
-        next_mut.prev.set(prev);
+        let mut prev_ptr = self.prev.get();
+        let prev_mut = unsafe {prev_ptr.as_mut()};
+        // prev_mut asserts
+        prev_mut.assert_in_list();
+        assert!(prev_mut.next.get() == self_ptr);
+
+        let mut next_ptr = self.next.get();
+        let next_mut = unsafe {next_ptr.as_mut()};
+        // next_mut asserts
+        next_mut.assert_in_list();
+        assert!(next_mut.prev.get() == self_ptr);
+
+        // swap the next box's prev with this one's
+        next_mut.prev.swap(&self.prev);
+
+        // swap the prev box's next with this one's
+        prev_mut.next.swap(&self.next);
+
+        next_mut.assert_in_list();
+        prev_mut.assert_in_list();
+    }
+
+    fn assert_not_in_list(&self) {
+        let self_ptr = self.self_ptr();
+
+        assert!(self.prev.get() == self_ptr);
+        assert!(self.next.get() == self_ptr);
+    }
+
+    fn assert_in_list(&self) {
+        let self_ptr = self.self_ptr();
+
+        // make sure they are not pointing to self and that they are not the same.
+        assert!(self.prev.get() != self_ptr);
+        assert!(self.next.get() != self_ptr);
+        assert!(self.prev.get() != self.next.get());
+
+        let prev_box = unsafe {self.prev.get().as_ref()};
+        let next_box = unsafe {self.next.get().as_ref()};
+
+        assert!(prev_box.next.get() == self_ptr);
+        assert!(next_box.prev.get() == self_ptr);
+    }
+
+    /// Should only be run once all operations for the increment are done. Will panic if self is
+    /// not in the list.
+    fn default_asserts(&self) {
+        self.assert_in_list();
+
+        let flags = self.flags.get();
+
+        if flags.contains(DataFlags::DEAD) {
+            assert!(self.get() == &Data::None);
+        } else {
+            assert!(self.get() != &Data::None);
+        }
     }
 }
 
 
 /// A simple object with some data that allows calling stored methods. This is the bare-minimum for
 /// a generic object type, and is a building block for more specialized object types.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct BasicObject {
     fields: FxHashMap<Ident, Primitive>,
 }
+impl BasicObject {
+    pub fn new()->Self {
+        BasicObject {
+            fields: FxHashMap::default(),
+        }
+    }
+}
 impl Object for BasicObject {
-    fn call_method<'a>(&mut self, name: Ident, params: ObjectParams<'a>, args: Vec<Primitive>)->Result<Primitive> {
-        let (interp, i_params) = params.into_interp_params();
+    fn call_method<'a>(&mut self, name: Ident, params: ObjectParams<'a>, args: Vec<Primitive>, self_ref: DataRef)->Result<Primitive> {
         let data = match self.fields.get(&name) {
             Some(d)=>d.clone(),
-            None=>bail!("BasicObject does not have the method `{}`", i_params.interner.get(name)),
+            None=>bail!("BasicObject does not have the method `{}`", params.state.interner.get(name)),
         };
 
-        interp.call(data, args, i_params)
+        params.interpreter.call(data, Some(Primitive::Ref(self_ref)), args, params.state)
+    }
+
+    fn compare(&self, other: &Box<dyn Object>)->bool {
+        let Some(other_ref) = <dyn Any>::downcast_ref::<Self>(other) else {return false};
+        self == other_ref
     }
 
     fn trace(&self, tracer: &mut dyn GcTracer) {
@@ -480,32 +664,32 @@ impl Object for BasicObject {
 
 /// The `initialUnits` field is not exposed in the `Object` interface because it is only used
 /// at initialization.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct GcParams {
-    /// How many units are allocated when the GC is initialized. Must be greater than 0, but the GC
+    /// How many items are allocated when the GC is initialized. Must be greater than 0, but the GC
     /// will make sure of this regardless.
-    initial_units: usize,
-    
-    /// How few units have to be remaining to trigger a batch allocation
+    initial_items: usize,
+
+    /// How few items have to be remaining to trigger a batch allocation
     min_free_count: usize,
 
-    /// How many units are allocated in each batch
+    /// How many items are allocated in each batch
     alloc_count: usize,
 
-    /// The minimum amount of units are traced. Works with `incremental_divisor` to determine how
-    /// many units are traced this cycle. Even if this is set to zero, the collector will always
+    /// The minimum amount of items are traced. Works with `incremental_divisor` to determine how
+    /// many items are traced this cycle. Even if this is set to zero, the collector will always
     /// trace at least 1 item.
     incremental_min: usize,
 
     /// The minimum fraction of items that are scanned each iteration as `grey / divisor`. Works
-    /// with `incremental_count` to determine how many units are traced this cycle. Set to zero to
+    /// with `incremental_count` to determine how many items are traced this cycle. Set to zero to
     /// disable.
     incremental_divisor: usize,
 
-    /// How many white roots units to mark grey each increment.
+    /// How many white roots items to mark grey each increment.
     mark_grey_count: usize,
 
-    /// How many dead white units to set dead and drop the data.
+    /// How many dead white items to set dead and drop the data.
     mark_dead_count: usize,
 
     /// Whether to call the GC on function returns.
@@ -518,9 +702,14 @@ impl Object for Rc<Cell<GcParams>> {
         // Nothing to do here
     }
 
+    fn compare(&self, other: &Box<dyn Object>)->bool {
+        let Some(other_ref) = <dyn Any>::downcast_ref::<Self>(other) else {return false};
+        self == other_ref
+    }
+
     fn get_field<'a>(&self, name: Ident, params: ObjectParams<'a>)->Result<Primitive> {
         let gcp = self.get();
-        match params.interner.get(name) {
+        match params.state.interner.get(name) {
             "minFreeCount"=>Ok(Primitive::Int(gcp.min_free_count as i64)),
             "allocCount"=>Ok(Primitive::Int(gcp.alloc_count as i64)),
             "incrementalCount"=>Ok(Primitive::Int(gcp.incremental_min as i64)),
@@ -537,7 +726,7 @@ impl Object for Rc<Cell<GcParams>> {
 
     fn set_field<'a>(&mut self, name: Ident, params: ObjectParams<'a>, data: Primitive)->Result<()> {
         let mut gcp = self.get();
-        match params.interner.get(name) {
+        match params.state.interner.get(name) {
             "minFreeCount"=>gcp.min_free_count =
                 data.int_or(anyhow!("GcParams.minFreeCount only takes ints"))? as usize,
 
@@ -574,9 +763,9 @@ impl Object for Rc<Cell<GcParams>> {
 impl Default for GcParams {
     fn default()->Self {
         GcParams {
-            initial_units: 0,
-            min_free_count: 4,
-            alloc_count: 32,
+            initial_items: 0,
+            min_free_count: 2,
+            alloc_count: 4,
 
             incremental_min: 16,
             incremental_divisor: 16,
@@ -593,9 +782,10 @@ impl Default for GcParams {
 /// A slice of objects that is allocated. We only need to know the pointer and layout for
 /// deallocation (WIP).
 #[derive(Debug, Copy, Clone)]
+#[allow(dead_code)]
 struct AllocSlice {
-    layout: Layout,
-    ptr: *mut u8,
+    pub layout: Layout,
+    pub ptr: *mut u8,
 }
 
 /// A pointer to the head of the colored slice of the ring list and how many are in it.
@@ -628,167 +818,167 @@ struct ColorPtrCount {
 /// interpreter should assign this to a variable to allow the user to configure the GC.
 ///
 /// TODO: Deallocation of object slices.
+#[derive(Debug)]
 pub struct GcContext {
     /// Points to the next dead item.
     dead: ColorPtrCount,
     /// The count of white items.
     white_count: usize,
-    /// Points to the next grey item in the list. The PREVIOUS item in UNMARKED WHITE.
+    /// Points to the next grey item in the list.
     grey: ColorPtrCount,
-    /// Points to the latest black item in the list. The PREVIOUS item is GREY.
+    /// Points to the latest black item in the list.
     black: ColorPtrCount,
 
-    unit_count: usize,
+    item_count: usize,
     incr_state: IncrementalState,
 
-    unmarked_flag: DataFlags,
+    white_flag: DataFlags,
     black_flag: DataFlags,
 
-    // tracking for whate white parts are already traced in `GreyRoots`
+    // tracking for what white parts are already traced in `GreyRoots`
     last_white_worked: Option<DataRef>,
     white_worked: usize,
 
     /// `GcParams` are stored as `Object` to allow the user program to tune them.
-    params: Rc<Cell<GcParams>>,
-    params_dr: DataRef,
+    pub params: Rc<Cell<GcParams>>,
+    pub params_dr: DataRef,
     slices: Vec<AllocSlice>,
 }
 impl GcContext {
     pub fn new(params: GcParams)->Self {
         use std::alloc::alloc;
 
-        let count = params.initial_units.max(1);
+        let count = params.initial_items;
 
-        let layout = Layout::array::<DataBox>(count)
-            .expect("Initial unit count too large!");
-        let ptr = unsafe {alloc(layout)};
-
+        let layout = Layout::array::<DataBox>(4).unwrap();
         let first_ptr = unsafe {alloc(layout)} as *mut DataBox;
         let first = NonNull::new(first_ptr)
-            .expect("Could not allocate GC initial units");
+            .expect("Could not allocate GC first item");
 
-        let last_ptr = unsafe {first_ptr.offset(count as isize)};
-        let last = NonNull::new(last_ptr).unwrap();
+        let second_ptr = unsafe {first_ptr.offset(1)};
+        let second = unsafe {NonNull::new_unchecked(second_ptr)};
 
-        let mut prev = last;
+        let third_ptr = unsafe {second_ptr.offset(1)};
+        let third = unsafe {NonNull::new_unchecked(third_ptr)};
 
-        // loop through first..second_to_last items and intialize the `DataBox`es. Does nothing if
-        // `count` is 1.
-        // NOTE: This might be the source of some bugs.
-        for i in 0..(count - 1) {
-            let current_ptr = unsafe {first_ptr.offset(i as isize)};
-            let current = NonNull::new(current_ptr).unwrap();
+        let fourth_ptr = unsafe {third_ptr.offset(1)};
+        let fourth = unsafe {NonNull::new_unchecked(fourth_ptr)};
 
-            let next_ptr = unsafe {first_ptr.offset(i as isize + 1)};
-            let next = NonNull::new(next_ptr).unwrap();
 
-            unsafe {
-                ptr::write(
-                    current_ptr,
-                    DataBox::empty(prev, next),
-                );
-            }
-
-            prev = current;
-        }
-
-        // special-case the last pointer in the list because `next` is actually `first`
-        // NOTE: This might be the source of some bugs.
+        let base_count = 4;
         unsafe {
             ptr::write(
-                last_ptr,
-                DataBox::empty(prev, first)
+                first_ptr,
+                DataBox::from_prev_next(fourth, second),
+            );
+        }
+        unsafe {
+            ptr::write(
+                second_ptr,
+                DataBox::from_prev_next(first, third),
+            );
+        }
+        unsafe {
+            ptr::write(
+                third_ptr,
+                DataBox::from_prev_next(second, fourth),
+            );
+        }
+        unsafe {
+            ptr::write(
+                fourth_ptr,
+                DataBox::from_prev_next(third, first),
             );
         }
 
-        // Set the `GcParams` data box as a permanent object and unmarked with data.
-        // The permanent status means it gets automatically set to black when marked, and it can
-        // also be set as root if needed, but that is only to satisfy the external things wanting a
-        // root item.
-        let params_dr = DataRef(first);
-        let params_db = params_dr.get_box();
-        params_db.flags.set(DataFlags::PERMANENT | DataFlags::A);
-        // make the `Rc<Cell<GcParams>>` and insert it
-        let params_rc = Rc::new(Cell::new(params));
-        *params_db.get_mut() = Data::Object(Box::new(params_rc.clone()));
+        unsafe {
+            first.as_ref().default_asserts();
+            second.as_ref().default_asserts();
+            third.as_ref().default_asserts();
+            fourth.as_ref().default_asserts();
+        }
 
-        // get the second item in the list. This is used for the dead list.
-        let second = if count == 1 {
-            DataRef(first)
-        } else {
-            let second_ptr = unsafe {first_ptr.offset(1)};
-            DataRef(NonNull::new(second_ptr).unwrap())
-        };
+
+        // Get a temporary DataRef to satisfy the creation of GcContext. We will actually add it
+        // before we return from the function.
+        let params_dr = DataRef(first);
 
         // slices are used for releasing memory back to the OS
         let slices = vec![AllocSlice {
             layout,
-            ptr,
+            ptr: first_ptr as *mut u8,
         }];
 
         let dead = ColorPtrCount {
-            ptr: second,
-            len: count - 1,
+            ptr: DataRef(first),
+            len: base_count,
         };
         let grey = ColorPtrCount {
+            ptr: DataRef(fourth),
             len: 0,
-            ptr: DataRef(first),
         };
         let black = ColorPtrCount {
+            ptr: DataRef(fourth),
             len: 0,
-            ptr: DataRef(first),
         };
 
-        return GcContext {
+        let params_rc = Rc::new(Cell::new(params));
+        let mut out = GcContext {
             dead,
-            white_count: 1,
+            white_count: 0,
             grey,
             black,
 
-            unit_count: count,
+            item_count: base_count,
             incr_state: IncrementalState::default(),
 
-            unmarked_flag: DataFlags::A,
+            white_flag: DataFlags::A,
             black_flag: DataFlags::B,
 
             last_white_worked: None,
             white_worked: 0,
 
-            params: params_rc,
+            params: params_rc.clone(),
             params_dr,
             slices,
         };
+
+        // allocate the initial slice
+        out.alloc_slice(count);
+
+        let params_dr = out.alloc(Data::Object(Box::new(params_rc)));
+        params_dr.set_permanent();
+        out.params_dr = params_dr;
+
+        return out;
     }
 
     /// Allocates a new object as grey. This delays the discovery of garbage, but it makes sure
     /// that this object is not collected immediately.
     pub fn alloc(&mut self, data: Data)->DataRef {
+        let dr = self.remove_from_dead();
+        let db = dr.get_box();
+        db.assert_in_list();
 
-        let dr = self.dead.ptr;
-        let dr_box = dr.get_box();
-
-        let mut flags = dr_box.flags.get();
+        let mut flags = db.flags.get();
+        assert!(flags.contains(DataFlags::DEAD));
         flags.set(DataFlags::DEAD, false);
         flags.set(DataFlags::GREY, true);
-        dr_box.flags.set(flags);
+        db.flags.set(flags);
 
-        self.dead.ptr = dr_box.next();
-        self.dead.len -= 1;
+        *db.get_mut() = data;
 
-        *dr_box.get_mut() = data;
+        self.move_to_grey(dr);
 
-        dr_box.remove_from_list();
-        self.insert_grey(dr);
-
-        self.alloc_collect();
+        self.inc_collect();
 
         return dr;
     }
 
-    fn alloc_collect(&mut self) {
+    pub fn inc_collect(&mut self) {
         let params = self.params.get();
 
-        self.incremental_collect(&params);
+        self.incremental_collection(&params);
     }
 
     fn trace_workload(&self, params: &GcParams)->usize {
@@ -808,10 +998,6 @@ impl GcContext {
         params.mark_grey_count
     }
 
-    pub fn incremental_todo_count(&self)->usize {
-        self.white_count + self.grey.len
-    }
-
     pub fn cycle_done(&self)->bool {
         match self.incr_state {
             IncrementalState::MarkDead=>self.white_count == 0,
@@ -820,39 +1006,62 @@ impl GcContext {
     }
 
     /// Mark all white roots as grey. This is probably the fastest operation.
+    ///
+    /// # State example
+    /// Below is an example of how we expect the double-linked ring list to look when this function
+    /// starts.
+    ///
+    /// Dead: 4; White: 12; Grey: 0; Black: 0
+    /// ```
+    /// | ------------ | ----------------------------------- |
+    /// | 00 01 02 03  | 04 05 06 07 08 09 10 11 12 13 14 15 |
+    /// | ------------ | ----------------------------------- |
+    /// | ^--> Dead    | ^-->           White           <--^ |
+    /// |              |                          Black <--^ |
+    /// |              |                           Grey <--^ |
+    /// | ------------ | ----------------------------------- |
+    /// | ^ We start   | ^ ... to here and                   |
+    /// | here and go  | mark the roots grey                 |
+    /// | backwards... |                                     |
+    /// | ------------ | ----------------------------------- |
+    /// ```
     fn mark_grey_state(&mut self, workload: usize) {
         // reset the state if it is incorrect
         if self.last_white_worked.is_none() {
             self.white_worked = 0;
-            let ptr = self.dead.ptr;
-            let ptr_box = ptr.get_box();
-            self.last_white_worked = Some(ptr_box.prev());
+            self.last_white_worked = Some(self.black.ptr);
         }
 
-        // loop through the white units until either the max workload is reached or we run out of
-        // units
+        // loop through the white items until either the max workload is reached or we run out of
+        // items
         let mut next = self.last_white_worked.unwrap();  // load the state
-        let todo_count = self.white_count.min(workload);
+        let todo_count = self.white_count.min(workload.max(1));
+
+        #[allow(unused)]
+        let mut marked = 0;
+
         for _ in 0..todo_count {
             // get the pointer and box and set the next pointer
             let todo = next;
             let todo_box = todo.get_box();
             next = todo_box.prev();
+            todo_box.assert_in_list();
 
             // check the flags
             let mut flags = todo_box.flags.get();
-            if flags.is_auto_grey() {   // we are a root/permanent unit
-                // take it out of white count
-                self.white_count -= 1;
+            assert!(flags.contains(self.white_flag));
 
-                // set the flags to grey and !unmarked
+            if flags.is_auto_grey() {   // we are a root/permanent item
+                marked += 1;
+
+                // set the flags to grey and !white
                 flags.set(DataFlags::GREY, true);
-                flags.set(self.unmarked_flag, false);
+                flags.set(self.white_flag, false);
                 todo_box.flags.set(flags);
 
                 // remove it from the white list and add it to the grey list
-                todo_box.remove_from_list();
-                self.insert_grey(todo);
+                self.white_count -= 1;
+                self.move_to_grey(todo);
             } else {    // we are NOT root/permanent, so add it to the worked count
                 self.white_worked += 1;
             }
@@ -861,47 +1070,102 @@ impl GcContext {
         // save the state
         self.last_white_worked = Some(next);
 
-        // if we have worked all the white units then go to the next state and clear this one's
+        // if we have worked all the white items then go to the next state and clear this one's
         // state
         if self.white_worked == self.white_count {
+            // Move the black pointer to before the mass of white items.
+            // **This is important!** When we move a white item to grey and the black pointer
+            // happens to be at that item, then it will cause errors later when the black
+            // pointer is in the wrong spot (middle of the grey list). Also clear the
+            // `last_white_worked` field for the next state.
+            self.black.ptr = self.last_white_worked.take().unwrap();
+
+            // eprintln!("Finish MarkRootsGrey with {} marked and {} worked this round", marked, todo_count);
             self.white_worked = 0;
-            self.last_white_worked = None;
             self.incr_state = IncrementalState::Trace;
+        } else {
+            // eprintln!("Pause MarkRootsGrey with {} marked and {} worked", marked, todo_count);
         }
     }
 
     /// Trace all grey objects, marking them as black. This takes the longest amount of time to
     /// complete.
+    ///
+    /// # State example
+    /// Below is an example of how we expect the double-linked ring list to look when this function
+    /// starts.
+    ///
+    /// Dead: 4; White: 10; Grey: 2; Black: 0
+    /// ```
+    /// | ------------ | ----------------------------- | --------------- |
+    /// | 00 01 02 03  | 04 05 06 07 08 09 10 11 12 13 | 14           15 |
+    /// | ------------ | ----------------------------- | --------------- |
+    /// | ^--> Dead    | ^-->        White        <--^ | Grey       <--^ |
+    /// |              |                    Black <--^ |                 |
+    /// | ------------ | ----------------------------- | --------------- |
+    /// |              |                               | For each grey,  |
+    /// |              |                               | item we trace   |
+    /// |              |                               | it and blacken  |
+    /// |              |                               | it.             |
+    /// | ------------ | ----------------------------- | --------------- |
+    /// ```
     fn trace_state(&mut self, workload: usize) {
-        // iterate through the grey units until we either run out or reach the workload
-        let mut i = 0;
-        while i < workload && self.grey.len > 0 {
+        assert!(self.black_flag != self.white_flag);
+        // iterate through the grey items until we either run out or reach the workload
+        let count = self.grey.len.min(workload.max(1));
+        for _ in 0..count {
+            // eprintln!("------");
+            // self.debug_all_data();
+            // eprintln!("------\n");
+
             // get the pointer and box
-            let todo = self.grey.ptr;
+            let todo = self.remove_from_grey();
             let todo_box = todo.get_box();
 
-            // remove the pointer from the LL and trace it
-            todo_box.remove_from_list();
+            let mut flags = todo_box.flags.get();
+            assert!(flags.contains(DataFlags::GREY));
+
+            // trace the pointer
             todo_box.get().trace(self);
 
             // clear grey flag and set black flag
-            let mut flags = todo_box.flags.get();
             flags.set(DataFlags::GREY, false);
             flags.set(self.black_flag, true);
             todo_box.flags.set(flags);
 
             // insert to the black segment
-            self.insert_black(todo);
-            i += 1;
+            self.move_to_black(todo);
         }
 
         // if there are no more grey items, then go to the next state
         if self.grey.len == 0 {
+            eprintln!("Finish TraceGrey with {} traced", count);
             self.incr_state = IncrementalState::MarkDead;
+        } else {
+            eprintln!("Pause TraceGrey with {} traced", count);
         }
     }
 
     /// Mark all white objects as dead and finalize their data.
+    ///
+    /// # State example
+    /// Below is an example of how we expect the double-linked ring list to look when this function
+    /// starts.
+    ///
+    /// Dead: 4; White: 5; Grey: 0; Black: 7
+    /// ```
+    /// | ------------ | ----------------------- | ----------- |
+    /// | 00 01 02 03  | 04 05 06 07 08 09 10 11 | 12 13 14 15 |
+    /// | ------------ | ----------------------- | ----------- |
+    /// | ^--> Dead    |              Black <--^ | ^--White--^ |
+    /// | ------------ | ----------------------- | ----------- |
+    /// | ^ We start   |                         | ^ ... to    |
+    /// | here and go  |                         | here and    |
+    /// | backwards... |                         | mark all of |
+    /// |              |                         | the white   |
+    /// |              |                         | items dead  |
+    /// | ------------ | ----------------------- | ----------- |
+    /// ```
     fn mark_dead_state(&mut self, workload: usize) {
         // reset the state if it is incorrect, reusing the fields from the `MarkGrey` state
         if self.last_white_worked.is_none() {
@@ -911,33 +1175,44 @@ impl GcContext {
         }
 
         let mut next = self.last_white_worked.unwrap();
-        let todo_count = self.white_count.min(workload);
+        let todo_count = self.white_count.min(workload.max(1));
         for _ in 0..todo_count {
             // get the pointer, box, and flags then set the next pointer
             let todo = next;
             let todo_box = todo.get_box();
-            let mut flags = todo_box.flags.get();
+
+            // update loop state
             next = todo_box.prev();
 
-            // remove from the white count
-            self.white_count -= 1;
+            let mut flags = todo_box.flags.get();
+            assert!(flags.contains(self.white_flag));
 
-            // set the flags to dead and !unmarked
+            // set the flags to dead and !white
             flags.set(DataFlags::DEAD, true);
-            flags.set(self.unmarked_flag, false);
+            flags.set(self.white_flag, false);
             todo_box.flags.set(flags);
-            todo_box.get_mut().finalize();
+
+            // finalize and clear the data
+            let data_mut = todo_box.get_mut();
+            data_mut.finalize();
+            *data_mut = Data::None;
 
             // remove it from the white list and add it to the dead list
-            todo_box.remove_from_list();
-            self.insert_dead(todo);
+            self.white_count -= 1;
+
+            // NOTE
+            self.move_to_dead(todo);
         }
         self.last_white_worked = Some(next);
 
         // no need to change state here. We handle it in `Self::incremental_collect`. We do still
         // have to reset the state though.
         if self.white_count == 0 {
+            assert!((self.dead.len + self.black.len) == self.item_count);
+            eprintln!("Finish MarkDead with {} marked", todo_count);
             self.last_white_worked = None;
+        } else {
+            eprintln!("Pause MarkDead with {} marked", todo_count);
         }
     }
 
@@ -945,9 +1220,15 @@ impl GcContext {
     fn alloc_slice(&mut self, count: usize) {
         use std::alloc::alloc;
 
+        if count == 0 {
+            eprintln!("Not allocating");
+            return;
+        }
+
         // get the layout and allocate
         let layout = Layout::array::<DataBox>(count).unwrap();
         let ptr = unsafe {alloc(layout)};
+        eprintln!("Allocating {} items at {:?}", count, ptr);
 
         // convert to the correct type
         let first_ptr = ptr as *mut DataBox;
@@ -970,28 +1251,68 @@ impl GcContext {
 
             // initialize it "safely" with `std::ptr::write`
             unsafe {
+                let db_ptr = NonNull::new_unchecked(i_ptr);
                 ptr::write(
                     i_ptr,
-                    DataBox::empty(self.dead.ptr.0, self.dead.ptr.0),
+                    DataBox::empty(db_ptr),
                 );
             }
 
             // get the `DataRef` and add it to the dead list
             // SAFETY: We have already written to and validated the pointer.
             let dr = DataRef(unsafe {NonNull::new_unchecked(i_ptr)});
-            self.insert_dead(dr);
+
+            dr.get_box().assert_not_in_list();
+            self.insert_new_alloc(dr);
+            dr.get_box().assert_in_list();
+
+            self.item_count += 1;
         }
     }
 
     /// Controller for the incremental collection state machine. Returns `true` when a cycle has
     /// been completed.
-    pub fn incremental_collect(&mut self, params: &GcParams)->bool {
+    ///
+    /// # Explanation
+    /// We cycle through 3 phases: Grey Roots, Trace, and Mark Dead.
+    ///
+    /// ## Allocating new data
+    /// Due to the fact this is an incremental collector, it means any white data may be considered
+    /// dead at any time, so we allocate new data as grey. This means that regardless of when we
+    /// allocate data, it will always persist at least one full collection cycle.
+    ///
+    /// ## Grey Roots
+    /// In this phase we mark all the white roots grey for tracing. This is quite a fast operation,
+    /// so the [`GcParams`] should be configured appropriately.
+    ///
+    /// ## Trace
+    /// In this phase we trace all they grey items, greying anything we trace over. Since tracing
+    /// could take a long time, I recommend analyzing the data that will be allocated to determine
+    /// if it is better to have more or less tracing per cycle.
+    ///
+    /// ## Mark Dead
+    /// In this phase we finalize and mark all remaining white data dead. This phase may take an
+    /// indefinite time due to arbitrary finalizers being run. It is advised in the finalizer
+    /// documentation to keep it as short as possible, but this could still be the slowest phase.
+    ///
+    /// ## Resetting state when a cycle is complete
+    /// When a full collection cycle is complete, we swap the meaning of white and black to make
+    /// all black objects white for the Grey Roots phase. We also reset the black pointer to a
+    /// known location.
+    pub fn incremental_collection(&mut self, params: &GcParams)->bool {
         use IncrementalState as State;
 
-        // if we are below the free threshold, then allocate more units
+        eprintln!("------------ Before inc collect");
+        self.debug_all_data();
+        eprintln!("------------\n");
+
+        // if we are below the free threshold, then allocate more items
         if self.dead.len < params.min_free_count {
             self.alloc_slice(params.alloc_count);
         }
+
+        // short-circuit if we have no active allocations (other than GcParams)
+        if (self.item_count - self.dead.len) <= 1 {return true}
 
         // dispatch the work to their respective methods
         match self.incr_state {
@@ -1004,19 +1325,27 @@ impl GcContext {
                 self.trace_state(workload);
             },
             State::MarkDead=>{
-                let workload = self.trace_workload(params);
+                let workload = self.dealloc_workload(params);
                 self.mark_dead_state(workload);
             },
         }
 
+        eprintln!("------------ After inc collect");
+        self.debug_all_data();
+        eprintln!("------------\n");
 
         if self.cycle_done() {
-            // change the meaning of unmarked white and black
-            mem::swap(&mut self.unmarked_flag, &mut self.black_flag);
+            // change the meaning of white and black
+            mem::swap(&mut self.white_flag, &mut self.black_flag);
+
+            assert!((self.black.len + self.dead.len) == self.item_count);
+            assert!(self.grey.len == 0);
 
             self.incr_state = State::GreyRoots;
             self.white_count = self.black.len;
+
             self.black.len = 0;
+            self.grey.ptr = self.black.ptr;
 
             return true;
         }
@@ -1024,69 +1353,185 @@ impl GcContext {
         return false;
     }
 
-    /// Simply loops `incremental_collect` until it is done.
+    /// Simply loops `incremental_collect` until a full collection cycle is completed.
     pub fn full_collection(&mut self) {
         let params = self.params.get();
 
         loop {
-            let done = self.incremental_collect(&params);
+            let done = self.incremental_collection(&params);
             if done {break}
         }
     }
 
-    fn insert_black(&mut self, mut ptr: DataRef) {
-        // store required values
-        let old = self.black.ptr;
+    /// Grows toward the end relative to previously inserted items
+    fn move_to_black(&mut self, mut ptr: DataRef) {
+        assert!(ptr.0 != self.black.ptr.0);
+        self.black.ptr.get_box().assert_in_list();
+
         let ptr_box = ptr.get_box_mut();
+        ptr_box.assert_in_list();
 
         // insert the new black item
-        ptr_box.insert_before(old.0);
+        ptr_box.move_to_after(self.black.ptr.0);
+        ptr_box.assert_in_list();
 
         // update the pointer
         self.black.ptr = ptr;
         self.black.len += 1;
     }
 
-    fn insert_grey(&mut self, mut ptr: DataRef) {
-        // store required values
-        let old = self.grey.ptr;
-        let ptr_box = ptr.get_box_mut();
+    /// Shrinks to the "left"
+    fn remove_from_grey(&mut self)->DataRef {
+        let dr = self.grey.ptr;
+        let db = dr.get_box();
 
-        // insert the new black item
-        ptr_box.insert_before(old.0);
+        db.assert_in_list();
+
+        self.grey.ptr = db.prev();
+        self.grey.len -= 1;
+
+        return dr;
+    }
+
+    /// Grows toward the "right"
+    fn move_to_grey(&mut self, mut ptr: DataRef) {
+        let ptr_box = ptr.get_box_mut();
+        ptr_box.assert_in_list();
+
+        let flags = ptr_box.flags.get();
+        assert!(flags.contains(DataFlags::GREY));
+
+        if ptr.0 == self.grey.ptr.0 {
+            self.grey.len += 1;
+
+            return;
+        }
+
+        self.grey.ptr.get_box().assert_in_list();
+
+        // insert the new grey item
+        ptr_box.move_to_after(self.grey.ptr.0);
+        ptr_box.assert_in_list();
 
         // update the pointer
         self.grey.ptr = ptr;
         self.grey.len += 1;
     }
 
-    fn insert_dead(&mut self, mut ptr: DataRef) {
-        // store required values
-        let old = self.dead.ptr;
-        let ptr_box = ptr.get_box_mut();
+    /// Shrinks to the "right"
+    fn remove_from_dead(&mut self)->DataRef {
+        let dr = self.dead.ptr;
+        let db = dr.get_box();
 
-        // insert the new black item
-        ptr_box.insert_before(old.0);
+        db.assert_in_list();
+
+        self.dead.ptr = db.next();
+        self.dead.len -= 1;
+
+        return dr;
+    }
+
+    /// Grows toward the "left"
+    fn move_to_dead(&mut self, mut ptr: DataRef) {
+        assert!(ptr.0 != self.dead.ptr.0);
+        self.dead.ptr.get_box().assert_in_list();
+
+        let ptr_box = ptr.get_box_mut();
+        ptr_box.assert_in_list();
+
+        // insert the new dead item
+        ptr_box.move_to_before(self.dead.ptr.0);
+        ptr_box.assert_in_list();
 
         // update the pointer
         self.dead.ptr = ptr;
         self.dead.len += 1;
     }
 
-    fn mark_grey(&mut self, mut dr: DataRef) {
+    /// Grows toward the "left" just like `move_to_dead`
+    fn insert_new_alloc(&mut self, mut ptr: DataRef) {
+        assert!(ptr.0 != self.dead.ptr.0);
+        self.dead.ptr.get_box().assert_in_list();
+
+        let ptr_box = ptr.get_box_mut();
+        ptr_box.assert_not_in_list();
+
+        // insert the new dead item
+        ptr_box.insert_before(self.dead.ptr.0);
+        ptr_box.assert_in_list();
+
+        // update the pointer
+        self.dead.ptr = ptr;
+        self.dead.len += 1;
+    }
+
+    fn mark_grey(&mut self, dr: DataRef) {
         let db = dr.get_box();
+        db.assert_in_list();
+
         let mut flags = db.flags.get();
 
-        if flags.contains(self.unmarked_flag) {
-            flags.set(self.unmarked_flag, false);
+        if flags.contains(self.white_flag) {
+            flags.set(self.white_flag, false);
             flags.set(DataFlags::GREY, true);
             db.flags.set(flags);
 
-            let dr_box = dr.get_box_mut();
-            dr_box.remove_from_list();
             self.white_count -= 1;
 
-            self.insert_grey(dr);
+            self.move_to_grey(dr);
+        }
+    }
+
+    fn debug_all_data(&self) {
+        let items = self.item_count;
+        let dead = self.dead.len;
+        let white = self.white_count;
+        let grey = self.grey.len;
+        let black = self.black.len;
+
+        eprintln!("Units: {items}; Dead: {dead}; White: {white}; Grey: {grey}; Black: {black}");
+
+        let mut ptr = self.dead.ptr;
+        for _ in 0..items {
+            if ptr.0 == self.dead.ptr.0 {
+                eprintln!("Dead head v ");
+            }
+            let db = ptr.get_box();
+            let flags = db.flags.get();
+
+            db.default_asserts();
+
+            // debug the permanent, root, and color flags
+            if flags.contains(DataFlags::PERMANENT) {
+                eprint!("P");
+            } else {eprint!(" ")}
+
+            if flags.contains(DataFlags::ROOT) {
+                eprint!("R");
+            } else {eprint!(" ")}
+
+            if flags.contains(DataFlags::GREY) {
+                eprint!("G");
+            } else if flags.contains(self.black_flag) {
+                eprint!("B");
+            } else if flags.contains(self.white_flag) {
+                match self.incr_state {
+                    IncrementalState::MarkDead=>eprint!("O"),
+                    _=>eprint!("W"),
+                }
+            } else {
+                eprint!("D");
+            }
+
+            eprintln!(" - {:?}", db.get());
+
+            if ptr.0 == self.black.ptr.0 {
+                eprintln!("Black head ^ ");
+            }
+            if ptr.0 == self.grey.ptr.0 {
+                eprintln!("Grey head ^ ");
+            }
+            ptr = db.next();
         }
     }
 }

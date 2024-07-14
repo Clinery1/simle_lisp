@@ -18,13 +18,6 @@ use std::{
     time::Instant,
     fs::read_to_string,
 };
-use interpreter::{
-    ast::{
-        ModuleError,
-        convert,
-    },
-    Interpreter,
-};
 use parser::ReplContinue;
 use repl::Repl;
 
@@ -81,12 +74,19 @@ fn main() {
             let mut repl = Repl::new();
             repl.run(args.debug, args.stats_for_nerds)
         },
+        Some(Action::Run2{filename})=>run2(filename, args.stats_for_nerds, args.debug),
         Some(Action::Run{filename})=>run(filename, args.stats_for_nerds, args.debug),
     }
 }
 
-fn run(name: String, stats_for_nerds: bool, debug: u8) {
-    let source = read_to_string(name).unwrap();
+fn run(filename: String, stats_for_nerds: bool, debug: u8) {
+    use interpreter::{
+        ast::convert,
+        Interpreter,
+    };
+
+
+    let source = read_to_string(&filename).unwrap();
 
     let mut parser = parser::new_parser(source.as_str());
 
@@ -112,7 +112,7 @@ fn run(name: String, stats_for_nerds: bool, debug: u8) {
                 }
             }
 
-            let mut state = interpreter::ast::convert(exprs).unwrap();
+            let mut state = convert(exprs).unwrap();
             let mut interpreter = Interpreter::new(&mut state);
 
             if debug >= 3 {
@@ -146,15 +146,21 @@ fn run(name: String, stats_for_nerds: bool, debug: u8) {
                         println!("{} ins/s", human_readable_fmt(ins_per_sec));
                     }
                 },
-                Err(e)=>error_trace(e, &source, "example"),
+                Err(e)=>error_trace(e, &source, &filename),
             }
         },
-        Err(e)=>error_trace(e, &source, "example"),
+        Err(e)=>error_trace(e, &source, &filename),
     }
 }
 
-fn run2(name: String, stats_for_nerds: bool, debug: u8) {
-    let source = read_to_string(name).unwrap();
+fn run2(filename: String, stats_for_nerds: bool, debug: u8) {
+    use interpreter2::{
+        ast::convert,
+        Interpreter,
+    };
+
+
+    let source = read_to_string(&filename).unwrap();
 
     let mut parser = parser::new_parser(source.as_str());
 
@@ -180,19 +186,20 @@ fn run2(name: String, stats_for_nerds: bool, debug: u8) {
                 }
             }
 
-            let mut state = interpreter::ast::convert(exprs).unwrap();
-            let mut interpreter = Interpreter::new(&mut state);
+            let mut state = match convert(exprs) {
+                Ok(s)=>s,
+                Err(e)=>{
+                    error_trace(e, &source, &filename);
+                    return;
+                },
+            };
+            let mut interpreter = Interpreter::new(&mut state, None);
 
             if debug >= 3 {
-                use interpreter::ast::Instruction;
                 let mut iter = state.instructions.iter();
                 let mut i = 0;
                 while let Some(ins) = iter.next() {
                     let id = iter.cur_ins_id().unwrap();
-                    match ins {
-                        Instruction::Nop=>break,
-                        _=>{},
-                    }
                     println!("#{i:<3.} Id({:3.}) > {:?}", id.inner(), ins);
 
                     i += 1;
@@ -202,22 +209,24 @@ fn run2(name: String, stats_for_nerds: bool, debug: u8) {
             let res = interpreter.run(&mut state, None);
             match res {
                 Ok(res)=>{
+                    dbg!(res);
                     if stats_for_nerds {
-                        println!("> {res:?}");
-                        println!("Allocations: {}", interpreter.metrics.allocations);
-                        println!("Max call stack depth: {}", interpreter.metrics.max_call_stack_depth);
-                        println!("Instruction count: {}", interpreter.metrics.instructions_executed);
-                        println!("Max bytes allocated at once: {}", interpreter.metrics.max_allocation_bytes);
-                        println!("Runtime: {:?}", interpreter.metrics.total_run_time);
-                        let rt = interpreter.metrics.total_run_time.as_secs_f32();
-                        let ins_per_sec = interpreter.metrics.instructions_executed as f32 / rt;
-                        println!("{} ins/s", human_readable_fmt(ins_per_sec));
+                        todo!();
+                        // println!("> {res:?}");
+                        // println!("Allocations: {}", interpreter.metrics.allocations);
+                        // println!("Max call stack depth: {}", interpreter.metrics.max_call_stack_depth);
+                        // println!("Instruction count: {}", interpreter.metrics.instructions_executed);
+                        // println!("Max bytes allocated at once: {}", interpreter.metrics.max_allocation_bytes);
+                        // println!("Runtime: {:?}", interpreter.metrics.total_run_time);
+                        // let rt = interpreter.metrics.total_run_time.as_secs_f32();
+                        // let ins_per_sec = interpreter.metrics.instructions_executed as f32 / rt;
+                        // println!("{} ins/s", human_readable_fmt(ins_per_sec));
                     }
                 },
-                Err(e)=>error_trace(e, &source, "example"),
+                Err(e)=>error_trace(e, &source, &filename),
             }
         },
-        Err(e)=>error_trace(e, &source, "example"),
+        Err(e)=>error_trace(e, &source, &filename),
     }
 }
 
@@ -237,7 +246,10 @@ pub fn error_trace(err: anyhow::Error, source: &str, file_path: impl Display) {
     let mut chain = err.chain().rev().peekable();
     let Some(root_cause) = chain.next() else {unreachable!("Error has no root cause!")};
 
-    if let Some(_) = root_cause.downcast_ref::<ModuleError>() {
+    // TODO: change this when V2 is done
+    if let Some(_) = root_cause.downcast_ref::<interpreter::ast::ModuleError>() {
+        return;
+    } else if let Some(_) = root_cause.downcast_ref::<interpreter2::ast::ModuleError>() {
         return;
     } else if let Some(serr) = root_cause.downcast_ref::<SimpleError<String>>() {
         serr.eprint_with_source(source, file_path);
